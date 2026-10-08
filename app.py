@@ -17,6 +17,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 def cargar_y_limpiar(file_obj):
     if file_obj is None: return pd.DataFrame()
     filename = file_obj.name
+    df_raw = pd.DataFrame()
+    
     if filename.endswith('.csv'):
         encodings = ['utf-8-sig', 'latin1', 'cp1252', 'utf-8']
         for enc in encodings:
@@ -29,6 +31,8 @@ def cargar_y_limpiar(file_obj):
         wb = openpyxl.load_workbook(file_obj, data_only=True)
         sheet = wb.active
         df_raw = pd.DataFrame(list(sheet.values))
+        
+    if df_raw.empty: return pd.DataFrame()
         
     df_raw = df_raw.dropna(how='all').reset_index(drop=True)
     
