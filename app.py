@@ -129,7 +129,7 @@ def cargar_anexo_excel(file_obj):
         col_trans_code = next((c for c in df.columns if 'TRANSPORTADOR' in c and 'CODIGO' in c), None)
         col_trans_name = next((c for c in df.columns if 'TRANSPORTADOR' in c and 'NOMBRE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c and 'FALTANTE' in c), None)
+        col_valor = next((c for c in df.columns if 'VALOR' in c and ('FALTANTE' in c or 'IMPORTE' in c)), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
         col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
         
@@ -164,7 +164,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA Y CLASIFICACIÓN ---
+# --- MOTOR DE AUDITORÍA Y CLASIFICACIÓN BLINDADO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -175,6 +175,7 @@ def procesar_archivos(file_hist, file_anexo):
     if df_anexo.empty:
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
+    # Clasificación correcta del anexo de hoy
     saldados = df_anexo[df_anexo['Saldo_Num'] == 0].copy()
     con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0].copy()
     
@@ -189,7 +190,7 @@ def procesar_archivos(file_hist, file_anexo):
     nuevos = con_saldo_anexo[es_mes_actual].copy()
     pendientes = con_saldo_anexo.drop(nuevos.index).copy()
     
-    # CRUCE BLINDADO PARA OMITIDOS: Detecta cualquier faltante con saldo pendiente en el histórico del mes actual que no esté en el anexo de hoy
+    # Detección exacta de Omitidos (comparando montos y SAPs recientes)
     omitidos = pd.DataFrame()
     if not df_hist.empty:
         pendientes_hist = df_hist[
@@ -203,7 +204,6 @@ def procesar_archivos(file_hist, file_anexo):
         omitidos_list = []
         for _, row in pendientes_hist.iterrows():
             monto_hist = round(row['Valor_Faltante_Num'], 2)
-            # Si el monto exacto del histórico con saldo pendiente NO está por ningún lado en el anexo de hoy -> ¡Omitido!
             if monto_hist not in montos_presentes_hoy and row['Saldo_Num'] > 0:
                 omitidos_list.append(row)
                 
@@ -226,7 +226,7 @@ def procesar_archivos(file_hist, file_anexo):
     df_omitidos_ui = preparar_df_ui(omitidos)
     
     tot_nuevos = nuevos['Saldo_Num'].sum() if not nuevos.empty else 0
-    tot_saldados = saldados['Abonos_Num'].sum() if not saldados.empty else 0
+    tot_saldados = saldados['Abonos_Num'].sum() if not saldados.empty else (saldados['Valor_Faltante_Num'].sum() if not saldados.empty else 0)
     tot_pendientes = pendientes['Saldo_Num'].sum() if not pendientes.empty else 0
     tot_omitidos = omitidos['Saldo_Num'].sum() if not omitidos.empty else 0
     
@@ -313,4 +313,4 @@ if ejecutar:
                 st.markdown("### ⚠️ Atención: Estos faltantes del día anterior o del mes actual estaban en el histórico con saldo pendiente, pero fueron omitidos en el anexo de hoy.")
                 st.dataframe(df_omitidos, use_container_width=True)
 else:
-    st.info("💡 Sube el **Histórico Maestro (.csv)** de Popayán y el **Anexo del día**, luego presiona **EJECUTAR AUDITORÍA**.")
+    st.info("💡 Sube el **Histórico Maestro (.csv)** y el **Anexo del día**, luego presiona **EJECUTAR AUDITORÍA**.")
