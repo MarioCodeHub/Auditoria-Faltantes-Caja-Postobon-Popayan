@@ -9,7 +9,7 @@ import csv
 
 # Configuración de la página de Streamlit
 st.set_page_config(
-    page_title="Auditoría de Faltantes - Postobón",
+    page_title="Auditoría de Faltantes - Postobón Popayan",
     page_icon="🥤",
     layout="wide"
 )
@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO Y ANEXO ---
+# --- CARGAR HISTÓRICO CSV ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -61,14 +61,15 @@ def cargar_historico_csv(file_obj):
         content = file_obj.getvalue().decode('latin1')
         reader = csv.reader(content.splitlines(), delimiter=';')
         for r in reader:
-            rows.append(r)
+            if any(str(cell).strip() for cell in r):  # Ignorar filas totalmente vacías
+                rows.append(r)
             
         if not rows: return pd.DataFrame()
         
         header_idx = -1
         for idx, r in enumerate(rows):
             row_str = " ".join([str(c).upper() for c in r])
-            if "VALOR" in row_str and ("SALDO" in row_str or "CLIENTE" in row_str):
+            if "VALOR" in row_str or "IMPORTE" in row_str or "SALDO" in row_str:
                 header_idx = idx
                 break
                 
@@ -76,8 +77,10 @@ def cargar_historico_csv(file_obj):
         
         headers = [str(c).upper().replace('\n', ' ').strip() for c in rows[header_idx]]
         data_rows = rows[header_idx + 1:]
-        if len(data_rows) > 3000:
-            data_rows = data_rows[-3000:]
+        
+        # Tomar hasta las últimas 4000 filas para garantizar cobertura sin sobrecargar
+        if len(data_rows) > 4000:
+            data_rows = data_rows[-4000:]
             
         df = pd.DataFrame(data_rows)
         df.columns = headers[:len(df.columns)]
@@ -85,9 +88,9 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
         col_sap = next((c for c in df.columns if 'CLIENTE' in c or 'SAP' in c), df.columns[2] if len(df.columns) > 2 else None)
-        col_nombre = next((c for c in df.columns if 'NOMBRE DEL CLIENTE' in c or 'CLIENTE' in c), df.columns[3] if len(df.columns) > 3 else None)
-        col_fecha = next((c for c in df.columns if 'FECHA' in c and ('GENERA' in c or 'TR' in c)), df.columns[4] if len(df.columns) > 4 else None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c and 'FALTANTE' in c), df.columns[7] if len(df.columns) > 7 else None)
+        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'CLIENTE' in c or 'TITULAR' in c), df.columns[3] if len(df.columns) > 3 else None)
+        col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[4] if len(df.columns) > 4 else None)
+        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), df.columns[7] if len(df.columns) > 7 else None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), df.columns[8] if len(df.columns) > 8 else None)
         col_saldo = next((c for c in df.columns if 'SALDO' in c), df.columns[9] if len(df.columns) > 9 else None)
         
@@ -103,6 +106,8 @@ def cargar_historico_csv(file_obj):
     except Exception as e:
         return pd.DataFrame()
 
+
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -114,7 +119,7 @@ def cargar_anexo_excel(file_obj):
         header_idx = 0
         for idx, row in df_raw.iterrows():
             row_str = [str(c).upper().replace('\n', ' ').strip() for c in row if pd.notna(c)]
-            if any("VALOR" in c for c in row_str) and any("SALDO" in c for c in row_str):
+            if any("VALOR" in c or "IMPORTE" in c for c in row_str) and any("FECHA" in c for c in row_str):
                 header_idx = idx
                 break
                 
@@ -129,7 +134,7 @@ def cargar_anexo_excel(file_obj):
         col_trans_code = next((c for c in df.columns if 'TRANSPORTADOR' in c and 'CODIGO' in c), None)
         col_trans_name = next((c for c in df.columns if 'TRANSPORTADOR' in c and 'NOMBRE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c and ('FALTANTE' in c or 'IMPORTE' in c)), None)
+        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
         col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
         
@@ -159,12 +164,13 @@ def cargar_anexo_excel(file_obj):
         df['Fecha_DT'] = df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
         df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
         
+        # Filtrar solo filas con datos reales de dinero
         return df[(df['Valor_Faltante_Num'] > 0) | (df['Abonos_Num'] > 0) | (df['Saldo_Num'] >= 0)].copy()
     except Exception as e:
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA Y CLASIFICACIÓN BLINDADO ---
+# --- MOTOR DE AUDITORÍA Y CLASIFICACIÓN ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -175,7 +181,7 @@ def procesar_archivos(file_hist, file_anexo):
     if df_anexo.empty:
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-    # Clasificación correcta del anexo de hoy
+    # Clasificación precisa del anexo de hoy
     saldados = df_anexo[df_anexo['Saldo_Num'] == 0].copy()
     con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0].copy()
     
@@ -190,7 +196,7 @@ def procesar_archivos(file_hist, file_anexo):
     nuevos = con_saldo_anexo[es_mes_actual].copy()
     pendientes = con_saldo_anexo.drop(nuevos.index).copy()
     
-    # Detección exacta de Omitidos (comparando montos y SAPs recientes)
+    # Detección perfecta de Omitidos
     omitidos = pd.DataFrame()
     if not df_hist.empty:
         pendientes_hist = df_hist[
