@@ -9,7 +9,7 @@ import csv
 
 # Configuración de la página de Streamlit
 st.set_page_config(
-    page_title="Auditoría de Faltantes Popayan- Postobón",
+    page_title="Auditoría de Faltantes - Postobón",
     page_icon="🥤",
     layout="wide"
 )
@@ -87,7 +87,7 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
         col_sap = next((c for c in df.columns if 'CLIENTE' in c or 'SAP' in c or 'DUEDOR' in c), df.columns[2] if len(df.columns) > 2 else None)
-        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c), df.columns[3] if len(df.columns) > 3 else None)
+        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c or 'RESPONSABLE' in c), df.columns[3] if len(df.columns) > 3 else None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[4] if len(df.columns) > 4 else None)
         col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), df.columns[7] if len(df.columns) > 7 else None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), df.columns[8] if len(df.columns) > 8 else None)
@@ -95,7 +95,22 @@ def cargar_historico_csv(file_obj):
         col_motivo = next((c for c in df.columns if 'MOTIVO' in c), df.columns[12] if len(df.columns) > 12 else None)
         
         df['Deudor_SAP_OK'] = df[col_sap].apply(normalizar_sap) if col_sap else '1'
-        df['Nombre_Deudor_OK'] = df[col_nombre].apply(remover_tildes_y_raros) if col_nombre else 'CLIENTE'
+        
+        nombres_limpios = []
+        for _, row in df.iterrows():
+            nombre_raw = ""
+            if col_nombre and pd.notna(row[col_nombre]):
+                nombre_raw = str(row[col_nombre]).strip()
+            if not nombre_raw or "POSTOBON" in nombre_raw.upper():
+                for idx_col in [11, 12, 3]:
+                    if len(row) > idx_col and pd.notna(row[idx_col]):
+                        val_c = str(row[idx_col]).strip()
+                        if val_c and "POSTOBON" not in val_c.upper() and len(val_c) > 2:
+                            nombre_raw = val_c
+                            break
+            nombres_limpios.append(remover_tildes_y_raros(nombre_raw) if nombre_raw else 'TRANSPORTADOR/CLIENTE')
+
+        df['Nombre_Deudor_OK'] = nombres_limpios
         df['Valor_Faltante_Num'] = df[col_valor].apply(limpiar_monto) if col_valor else 0.0
         df['Abonos_Num'] = df[col_abono].apply(limpiar_monto) if col_abono else 0.0
         df['Saldo_Num'] = df[col_saldo].apply(limpiar_monto) if col_saldo else (df['Valor_Faltante_Num'] - df['Abonos_Num'])
@@ -130,10 +145,9 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_client_code = next((c for c in df.columns if 'CODIGO' in c and 'CLIENTE' in c), None)
         col_client_name = next((c for c in df.columns if 'NOMBRE' in c and 'CLIENTE' in c), None)
         col_trans_code = next((c for c in df.columns if 'DUEDOR SAP' in c or 'SAP' in c), None)
-        col_trans_name = next((c for c in df.columns if 'TITULAR' in c or 'TRANSPORTADOR' in c), None)
+        col_trans_name = next((c for c in df.columns if 'TITULAR' in c or 'TRANSPORTADOR' in c or 'RESPONSABLE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
         col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
@@ -190,37 +204,35 @@ def procesar_archivos(file_hist, file_anexo):
     if df_anexo.empty:
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-    # Mes actual fijo o determinado por la fecha más frecuente del anexo actual (Octubre 2026)
     mes_actual = 10
     anio_actual = 2026
     if not df_anexo['Fecha_DT'].isna().all():
-        # Tomar el mes que más se repite o la fecha máxima del archivo actual
         mes_actual = int(df_anexo['Fecha_DT'].dt.month.mode()[0])
         anio_actual = int(df_anexo['Fecha_DT'].dt.year.mode()[0])
         
-    # 1. Saldados (Saldo == 0 exacto)
     saldados = df_anexo[df_anexo['Saldo_Num'] <= 0.01].copy()
-    
-    # 2. Con saldo pendiente en el anexo de hoy
     con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0.01].copy()
     
-    # Nuevos Faltantes: Estrictamente los generados EN EL MES ACTUAL (Octubre 2026)
     es_mes_actual = (con_saldo_anexo['Fecha_DT'].dt.month == mes_actual) & (con_saldo_anexo['Fecha_DT'].dt.year == anio_actual)
     nuevos = con_saldo_anexo[es_mes_actual].copy()
-    
-    # Pendientes Activos: Los que vienen de meses anteriores (ej. mayo, septiembre) pero siguen vivos con saldo en el anexo
     pendientes = con_saldo_anexo.drop(nuevos.index).copy()
     
-    # 3. Omitidos en Anexo (Históricos con saldo que faltan hoy)
     omitidos = pd.DataFrame()
     if not df_hist.empty:
         pendientes_hist = df_hist[df_hist['Saldo_Num'] > 0].copy()
-        montos_presentes_hoy = set(df_anexo['Valor_Faltante_Num'].round(2))
+        
+        # Cruce exacto por combinación de SAP + Saldo o SAP + Monto para evitar falsos positivos
+        claves_presentes_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Saldo_Num'].round(2)))
+        claves_presentes_monto = set(df_anexo['Valor_Faltante_Num'].round(2))
         
         omitidos_list = []
         for _, row in pendientes_hist.iterrows():
-            monto_hist = round(row['Valor_Faltante_Num'], 2)
-            if monto_hist not in montos_presentes_hoy and row['Saldo_Num'] > 0:
+            sap_h = row['Deudor_SAP_OK']
+            saldo_h = round(row['Saldo_Num'], 2)
+            monto_h = round(row['Valor_Faltante_Num'], 2)
+            
+            # Si ni la tupla (SAP + Saldo) ni el saldo/monto están hoy en el anexo, se considera omitido real
+            if (sap_h, saldo_h) not in claves_presentes_hoy and saldo_h not in claves_presentes_monto and monto_h not in claves_presentes_monto:
                 omitidos_list.append(row)
                 
         if omitidos_list:
