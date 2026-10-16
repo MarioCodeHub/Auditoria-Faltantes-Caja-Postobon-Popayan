@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO CSV (POPAYÁN) ---
+# --- CARGAR HISTÓRICO CSV (ESTRUCTURA EXACTA POPAYÁN) ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -73,44 +73,43 @@ def cargar_historico_csv(file_obj):
                 
         if header_idx == -1: header_idx = 0
         
-        headers = [str(c).upper().replace('\n', ' ').strip() for c in rows[header_idx]]
         data_rows = rows[header_idx + 1:]
         
-        df = pd.DataFrame(data_rows)
-        df.columns = headers[:len(df.columns)]
-        df = df.loc[:, df.columns.notna()].copy()
-        df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
-        
-        col_sap = next((c for c in df.columns if 'SAP' in c or 'DUEDOR' in c), df.columns[5] if len(df.columns) > 5 else None)
-        col_nombre = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'OBSERVACION' in c), df.columns[6] if len(df.columns) > 6 else None)
-        col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[3] if len(df.columns) > 3 else None)
-        col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), df.columns[4] if len(df.columns) > 4 else None)
-        col_motivo = next((c for c in df.columns if 'MOTIVO' in c), df.columns[8] if len(df.columns) > 8 else None)
-        
-        df['Deudor_SAP_OK'] = df[col_sap].apply(normalizar_sap) if col_sap else '1'
-        
-        nombres_limpios = []
-        for _, row in df.iterrows():
-            nombre_raw = ""
-            if col_nombre and pd.notna(row[col_nombre]):
-                nombre_raw = str(row[col_nombre]).strip()
-            if not nombre_raw or "POSTOBON" in nombre_raw.upper():
-                for idx_col in [6, 7, 8, 13]:
-                    if len(row) > idx_col and pd.notna(row[idx_col]):
-                        val_c = str(row[idx_col]).strip()
-                        if val_c and "POSTOBON" not in val_c.upper() and len(val_c) > 2:
-                            nombre_raw = val_c
-                            break
-            nombres_limpios.append(remover_tildes_y_raros(nombre_raw) if nombre_raw else 'TRANSPORTADOR/CLIENTE')
-
-        df['Nombre_Deudor_OK'] = nombres_limpios
-        df['Valor_Faltante_Num'] = df[col_valor].apply(limpiar_monto) if col_valor else 0.0
-        df['Abonos_Num'] = 0.0
-        df['Saldo_Num'] = df['Valor_Faltante_Num']
-        df['Fecha_DT'] = df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
-        df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
-        df['Motivo_OK'] = df[col_motivo].apply(lambda x: str(x).strip()) if col_motivo else ''
-        
+        registros = []
+        for r in data_rows:
+            if len(r) < 6: continue
+            
+            # Mapeo exacto por índice de columna para Popayán
+            # 3: Fecha, 4: Importe, 5: Deudor SAP, 6: Titular Zona, 8: Motivo, 13: Observación
+            fecha_raw = r[3] if len(r) > 3 else ""
+            importe_raw = r[4] if len(r) > 4 else "0"
+            sap_raw = r[5] if len(r) > 5 else "1"
+            titular_raw = r[6] if len(r) > 6 else ""
+            motivo_raw = r[8] if len(r) > 8 else ""
+            obs_raw = r[13] if len(r) > 13 else ""
+            
+            val_monto = limpiar_monto(importe_raw)
+            if val_monto <= 0: continue
+            
+            f_dt = convertir_a_fecha(fecha_raw)
+            if pd.isna(f_dt): continue
+            
+            nombre_cliente = titular_raw if titular_raw and "POSTOBON" not in titular_raw.upper() else obs_raw
+            nombre_limpio = remover_tildes_y_raros(nombre_cliente) if nombre_cliente else "TRANSPORTADOR/CLIENTE"
+            
+            registros.append({
+                'Deudor_SAP_OK': normalizar_sap(sap_raw),
+                'Nombre_Deudor_OK': nombre_limpio,
+                'Valor_Faltante_Num': val_monto,
+                'Abonos_Num': 0.0,
+                'Saldo_Num': val_monto,
+                'Fecha_DT': f_dt,
+                'Fecha_UI': formatear_fecha_ui(f_dt),
+                'Motivo_OK': str(motivo_raw).strip()
+            })
+            
+        df = pd.DataFrame(registros)
+        if df.empty: return pd.DataFrame()
         return df[(df['Saldo_Num'] > 0) & (df['Deudor_SAP_OK'] != '') & (df['Fecha_DT'].notna())].copy()
     except Exception as e:
         return pd.DataFrame()
@@ -197,22 +196,40 @@ def procesar_archivos(file_hist, file_anexo):
     if df_anexo.empty:
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-    # Mes actual para Popayán (Octubre 2026)
     mes_actual = 10
     anio_actual = 2026
     if not df_anexo['Fecha_DT'].isna().all():
         mes_actual = int(df_anexo['Fecha_DT'].dt.month.mode()[0])
         anio_actual = int(df_anexo['Fecha_DT'].dt.year.mode()[0])
         
+    # Crear conjunto de llaves históricas (SAP + Monto) para cruce exacto
+    claves_historicas = set()
+    if not df_hist.empty:
+        for _, r in df_hist.iterrows():
+            claves_historicas.add((str(r['Deudor_SAP_OK']), round(float(r['Valor_Faltante_Num']), 2)))
+
     saldados = df_anexo[df_anexo['Saldo_Num'] <= 0.01].copy()
     con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0.01].copy()
     
-    # En Popayán, todos los registros con saldo del anexo actual que corresponden al mes actual son Nuevos Faltantes
-    es_mes_actual = (con_saldo_anexo['Fecha_DT'].dt.month == mes_actual) & (con_saldo_anexo['Fecha_DT'].dt.year == anio_actual)
-    nuevos = con_saldo_anexo[es_mes_actual].copy()
-    pendientes = con_saldo_anexo.drop(nuevos.index).copy()
+    nuevos_list, pendientes_list = [], []
+    for _, row in con_saldo_anexo.iterrows():
+        sap_r = str(row['Deudor_SAP_OK'])
+        val_r = round(float(row['Valor_Faltante_Num']), 2)
+        
+        # Si ya existía en el histórico maestro con anterioridad, va a Pendientes Activos
+        if (sap_r, val_r) in claves_historicas:
+            pendientes_list.append(row)
+        else:
+            # Si es del mes actual y no estaba en el histórico, es Nuevo Faltante
+            if row['Fecha_DT'].month == mes_actual and row['Fecha_DT'].year == anio_actual:
+                nuevos_list.append(row)
+            else:
+                pendientes_list.append(row)
+
+    nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=con_saldo_anexo.columns)
+    pendientes = pd.DataFrame(pendientes_list) if pendientes_list else pd.DataFrame(columns=con_saldo_anexo.columns)
     
-    # Omitidos en Anexo (Estaban en el histórico con saldo pero no aparecen hoy)
+    # Omitidos en Anexo (Estaban en el histórico con saldo pero no aparecen hoy en el anexo)
     omitidos = pd.DataFrame()
     if not df_hist.empty:
         pendientes_hist = df_hist[df_hist['Saldo_Num'] > 0].copy()
