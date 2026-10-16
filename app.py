@@ -53,46 +53,40 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO CSV ---
+# --- CARGAR HISTÓRICO CSV (ROBUSTO) ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
-        rows = []
         content = file_obj.getvalue().decode('latin1')
-        reader = csv.reader(content.splitlines(), delimiter=';')
-        for r in reader:
-            if any(str(cell).strip() for cell in r):
-                rows.append(r)
+        lines = content.splitlines()
+        reader = csv.reader(lines, delimiter=';')
+        rows = [r for r in reader if any(str(cell).strip() for cell in r)]
             
         if not rows: return pd.DataFrame()
         
         header_idx = -1
         for idx, r in enumerate(rows):
             row_str = " ".join([str(c).upper() for c in r])
-            if "VALOR" in row_str or "IMPORTE" in row_str or "SALDO" in row_str:
+            if "IMPORTE" in row_str or "VALOR" in row_str or "DUEDOR SAP" in row_str:
                 header_idx = idx
                 break
                 
-        if header_idx == -1: header_idx = 2
+        if header_idx == -1: header_idx = 0
         
         headers = [str(c).upper().replace('\n', ' ').strip() for c in rows[header_idx]]
         data_rows = rows[header_idx + 1:]
         
-        if len(data_rows) > 5000:
-            data_rows = data_rows[-5000:]
-            
         df = pd.DataFrame(data_rows)
         df.columns = headers[:len(df.columns)]
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'CLIENTE' in c or 'SAP' in c or 'DUEDOR' in c), df.columns[2] if len(df.columns) > 2 else None)
-        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c or 'RESPONSABLE' in c), df.columns[3] if len(df.columns) > 3 else None)
-        col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[4] if len(df.columns) > 4 else None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), df.columns[7] if len(df.columns) > 7 else None)
-        col_abono = next((c for c in df.columns if 'ABONO' in c), df.columns[8] if len(df.columns) > 8 else None)
-        col_saldo = next((c for c in df.columns if 'SALDO' in c), df.columns[9] if len(df.columns) > 9 else None)
-        col_motivo = next((c for c in df.columns if 'MOTIVO' in c), df.columns[12] if len(df.columns) > 12 else None)
+        # Mapeo inteligente de columnas del histórico
+        col_sap = next((c for c in df.columns if 'SAP' in c or 'DUEDOR' in c), df.columns[5] if len(df.columns) > 5 else None)
+        col_nombre = next((c for c in df.columns if 'OBSERVACION' in c or 'CLIENTE' in c or 'TITULAR' in c), df.columns[6] if len(df.columns) > 6 else None)
+        col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[3] if len(df.columns) > 3 else None)
+        col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), df.columns[4] if len(df.columns) > 4 else None)
+        col_motivo = next((c for c in df.columns if 'MOTIVO' in c), df.columns[8] if len(df.columns) > 8 else None)
         
         df['Deudor_SAP_OK'] = df[col_sap].apply(normalizar_sap) if col_sap else '1'
         
@@ -102,7 +96,7 @@ def cargar_historico_csv(file_obj):
             if col_nombre and pd.notna(row[col_nombre]):
                 nombre_raw = str(row[col_nombre]).strip()
             if not nombre_raw or "POSTOBON" in nombre_raw.upper():
-                for idx_col in [11, 12, 3]:
+                for idx_col in [6, 7, 8, 13]:
                     if len(row) > idx_col and pd.notna(row[idx_col]):
                         val_c = str(row[idx_col]).strip()
                         if val_c and "POSTOBON" not in val_c.upper() and len(val_c) > 2:
@@ -112,13 +106,13 @@ def cargar_historico_csv(file_obj):
 
         df['Nombre_Deudor_OK'] = nombres_limpios
         df['Valor_Faltante_Num'] = df[col_valor].apply(limpiar_monto) if col_valor else 0.0
-        df['Abonos_Num'] = df[col_abono].apply(limpiar_monto) if col_abono else 0.0
-        df['Saldo_Num'] = df[col_saldo].apply(limpiar_monto) if col_saldo else (df['Valor_Faltante_Num'] - df['Abonos_Num'])
+        df['Abonos_Num'] = 0.0 # En este formato CSV el importe ya es el saldo o se evalúa directo
+        df['Saldo_Num'] = df['Valor_Faltante_Num']
         df['Fecha_DT'] = df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
         df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
         df['Motivo_OK'] = df[col_motivo].apply(lambda x: str(x).strip()) if col_motivo else ''
         
-        return df[(df['Deudor_SAP_OK'] != '') & (df['Fecha_DT'].notna()) & (df['Fecha_DT'].dt.year >= 2026)].copy()
+        return df[(df['Saldo_Num'] > 0) & (df['Deudor_SAP_OK'] != '') & (df['Fecha_DT'].notna())].copy()
     except Exception as e:
         return pd.DataFrame()
 
@@ -210,31 +204,24 @@ def procesar_archivos(file_hist, file_anexo):
         mes_actual = int(df_anexo['Fecha_DT'].dt.month.mode()[0])
         anio_actual = int(df_anexo['Fecha_DT'].dt.year.mode()[0])
         
-    # Obtener conjunto de llaves (SAP + Monto o Saldo) que ya existían en el histórico con anterioridad
+    # Obtener llaves históricas (SAP + Monto)
     claves_historicas = set()
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
             claves_historicas.add((str(r['Deudor_SAP_OK']), round(float(r['Valor_Faltante_Num']), 2)))
-            claves_historicas.add((str(r['Deudor_SAP_OK']), round(float(r['Saldo_Num']), 2)))
 
-    # 1. Saldados (Saldo <= 0.01)
     saldados = df_anexo[df_anexo['Saldo_Num'] <= 0.01].copy()
-    
-    # 2. Con saldo pendiente en el anexo de hoy
     con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0.01].copy()
     
-    # Separar Nuevos vs Pendientes basándonos estrictamente en si ya existían en el histórico
     nuevos_list, pendientes_list = [], []
     for _, row in con_saldo_anexo.iterrows():
         sap_r = str(row['Deudor_SAP_OK'])
         val_r = round(float(row['Valor_Faltante_Num']), 2)
-        saldo_r = round(float(row['Saldo_Num']), 2)
         
-        # Si ya estaba en el histórico, es un PENDIENTE ACTIVO, no importa la fecha del anexo
-        if (sap_r, val_r) in claves_historicas or (sap_r, saldo_r) in claves_historicas:
+        # Si ya existía en el histórico CSV, es un PENDIENTE ACTIVO automático
+        if (sap_r, val_r) in claves_historicas:
             pendientes_list.append(row)
         else:
-            # Si no existía en el histórico, evaluamos si es del mes actual
             if row['Fecha_DT'].month == mes_actual and row['Fecha_DT'].year == anio_actual:
                 nuevos_list.append(row)
             else:
@@ -243,20 +230,17 @@ def procesar_archivos(file_hist, file_anexo):
     nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=con_saldo_anexo.columns)
     pendientes = pd.DataFrame(pendientes_list) if pendientes_list else pd.DataFrame(columns=con_saldo_anexo.columns)
     
-    # 3. Omitidos en Anexo (Históricos con saldo que faltan hoy en el anexo)
+    # Omitidos en Anexo
     omitidos = pd.DataFrame()
     if not df_hist.empty:
         pendientes_hist = df_hist[df_hist['Saldo_Num'] > 0].copy()
-        claves_presentes_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Saldo_Num'].round(2)))
-        claves_presentes_monto = set(df_anexo['Valor_Faltante_Num'].round(2))
+        claves_presentes_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Valor_Faltante_Num'].round(2)))
         
         omitidos_list = []
         for _, row in pendientes_hist.iterrows():
             sap_h = row['Deudor_SAP_OK']
-            saldo_h = round(row['Saldo_Num'], 2)
             monto_h = round(row['Valor_Faltante_Num'], 2)
-            
-            if (sap_h, saldo_h) not in claves_presentes_hoy and saldo_h not in claves_presentes_monto and monto_h not in claves_presentes_monto:
+            if (sap_h, monto_h) not in claves_presentes_hoy:
                 omitidos_list.append(row)
                 
         if omitidos_list:
