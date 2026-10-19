@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO RECIENTE (ÚLTIMAS 500 FILAS) ---
+# --- CARGAR HISTÓRICO RECIENTE ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -115,7 +115,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL DIARIO (POPAYÁN) ---
+# --- CARGAR ANEXO EXCEL DIARIO ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -185,7 +185,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA: LÓGICA DIARIA FINA Y PRECISA ---
+# --- MOTOR DE AUDITORÍA ROBUSTO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -202,39 +202,43 @@ def procesar_archivos(file_hist, file_anexo):
         mes_actual = int(df_anexo['Fecha_DT'].dt.month.mode()[0])
         anio_actual = int(df_anexo['Fecha_DT'].dt.year.mode()[0])
         
-    # Conjunto de SAPs activos en el histórico reciente
-    saps_historicos = set(df_hist['Deudor_SAP_OK'].astype(str)) if not df_hist.empty else set()
-    
-    # Llaves exactas (SAP + Monto) presentes hoy en el Anexo
+    # Llaves (SAP + Monto) del histórico reciente
+    claves_historicas = set()
+    if not df_hist.empty:
+        hist_pendientes = df_hist[df_hist['Saldo_Num'] > 0.01]
+        for _, r in hist_pendientes.iterrows():
+            claves_historicas.add((str(r['Deudor_SAP_OK']), round(float(r['Valor_Faltante_Num']), 2)))
+
+    # Llaves presentes hoy en el anexo
     claves_anexo_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Valor_Faltante_Num'].round(2)))
-    
-    # 1. SALDADOS / PAGADOS: Faltantes del histórico cuyo SAP ya no tiene deudas pendientes en el anexo de hoy
+
+    # 1. SALDADOS / PAGADOS: Estaban en el histórico con saldo, pero ya no están hoy en el anexo
     saldados_list = []
     if not df_hist.empty:
-        hist_pendientes = df_hist[df_hist['Saldo_Num'] > 0.01].copy()
-        saps_en_anexo_hoy = set(df_anexo['Deudor_SAP_OK'].astype(str))
-        
-        for _, row in hist_pendientes.iterrows():
+        for _, row in df_hist[df_hist['Saldo_Num'] > 0.01].iterrows():
             sap_h = str(row['Deudor_SAP_OK'])
             monto_h = round(float(row['Valor_Faltante_Num']), 2)
             
-            # Si el SAP estaba en el histórico pero ya no está en el anexo de hoy, se canceló/pagó por completo
-            if sap_h not in saps_en_anexo_hoy:
-                row_copy = row.copy()
-                row_copy['Abonos_Num'] = monto_h
-                row_copy['Saldo_Num'] = 0.0
-                saldados_list.append(row_copy)
+            # Si el registro exacto ya no está hoy en el anexo, se pagó
+            if (sap_h, monto_h) not in claves_anexo_hoy:
+                # Validamos que no siga vivo con otro monto (abono parcial)
+                saps_en_anexo = set(df_anexo['Deudor_SAP_OK'].astype(str))
+                if sap_h not in saps_en_anexo:
+                    row_copy = row.copy()
+                    row_copy['Abonos_Num'] = monto_h
+                    row_copy['Saldo_Num'] = 0.0
+                    saldados_list.append(row_copy)
 
     saldados = pd.DataFrame(saldados_list).drop_duplicates(subset=['Deudor_SAP_OK', 'Valor_Faltante_Num']) if saldados_list else pd.DataFrame()
 
-    # 2. CLASIFICAR ANEXO DE HOY: Nuevos vs Pendientes Activos (incluyendo abonos parciales como el de Carlos Lebaza)
+    # 2. CLASIFICAR ANEXO DE HOY: Nuevos vs Pendientes Activos
     nuevos_list, pendientes_list = [], []
     for _, row in df_anexo.iterrows():
         sap_r = str(row['Deudor_SAP_OK'])
         val_r = round(float(row['Valor_Faltante_Num']), 2)
         
-        # Si el SAP ya existía en el histórico, es un PENDIENTE ACTIVO (aunque su monto haya bajado por abono parcial)
-        if sap_r in saps_historicos or (sap_r, val_r) in claves_anexo_hoy:
+        # Si la llave exacta o el SAP ya venía del histórico, es Pendiente Activo (o abono parcial)
+        if (sap_r, val_r) in claves_historicas or sap_r in set(df_hist['Deudor_SAP_OK'].astype(str)):
             pendientes_list.append(row)
         else:
             if row['Fecha_DT'].month == mes_actual and row['Fecha_DT'].year == anio_actual:
