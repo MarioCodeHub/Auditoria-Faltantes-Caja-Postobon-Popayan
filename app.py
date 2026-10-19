@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO CSV (ESTRUCTURA POPAYÁN) ---
+# --- CARGAR HISTÓRICO ACOTADO (ÚLTIMAS 1.000 FILAS / AÑO 2026) ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -74,11 +74,15 @@ def cargar_historico_csv(file_obj):
         if header_idx == -1: header_idx = 0
         data_rows = rows[header_idx + 1:]
         
+        # Tomar únicamente las últimas 1.200 filas para evitar traer registros antiguos de 2023/2024
+        if len(data_rows) > 1200:
+            data_rows = data_rows[-1200:]
+        
         registros = []
         for r in data_rows:
             if len(r) < 5: continue
             
-            # Detectar columnas dinámicamente según la estructura de Popayán
+            # Mapeo según la estructura de Popayán
             # B: Centro, C: SAP, D: Titular, E: Fecha Gen, F: Fecha Leg, H: Valor, I: Abono, J: Saldo, K: Responsable, L: Motivo
             sap_raw = r[2] if len(r) > 2 and r[2].replace('.','').isdigit() else (r[3] if len(r) > 3 else "1")
             titular_raw = r[3] if len(r) > 3 and not r[3].replace('.','').isdigit() else (r[4] if len(r) > 4 else "")
@@ -94,6 +98,10 @@ def cargar_historico_csv(file_obj):
             
             if val_monto <= 0: continue
             f_dt = convertir_a_fecha(fecha_raw)
+            
+            # FILTRO ESTRICTO: Solo procesar registros del año 2026
+            if pd.isna(f_dt) or f_dt.year < 2026:
+                continue
             
             nombre_limpio = remover_tildes_y_raros(titular_raw) if titular_raw else "RESPONSABLE / ZONA"
             
@@ -184,7 +192,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CON COMPARACIÓN REAL HISTÓRICO VS ANEXO ---
+# --- MOTOR DE AUDITORÍA POPAYÁN BLINDADO (SOLO 2026) ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -204,7 +212,7 @@ def procesar_archivos(file_hist, file_anexo):
     # Mapa de claves presentes hoy en el Anexo (SAP + Monto)
     claves_anexo_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Valor_Faltante_Num'].round(2)))
     
-    # 1. DETECTAR SALDADOS / PAGADOS COMPARANDO HISTÓRICO VS ANEXO
+    # 1. DETECTAR SALDADOS / PAGADOS COMPARANDO HISTÓRICO VS ANEXO (SOLO 2026)
     saldados_list = []
     pendientes_hist_claves = set()
     
@@ -215,13 +223,13 @@ def procesar_archivos(file_hist, file_anexo):
             abono_h = round(float(row['Abonos_Num']), 2)
             saldo_h = round(float(row['Saldo_Num']), 2)
             
-            # Caso A: En el Histórico ya figura pagado (Saldo == 0 o Abono == Monto)
+            # Caso A: En el Histórico 2026 ya figura pagado (Saldo == 0 o Abono == Monto)
             if saldo_h <= 0.01 or (abono_h >= monto_h and monto_h > 0):
                 row_copy = row.copy()
                 row_copy['Abonos_Num'] = monto_h
                 row_copy['Saldo_Num'] = 0.0
                 saldados_list.append(row_copy)
-            # Caso B: Estaba PENDIENTE en el histórico pero HOY YA NO APARECE EN EL ANEXO (Se Pagó)
+            # Caso B: Estaba PENDIENTE en el histórico 2026 pero HOY YA NO APARECE EN EL ANEXO (Se Pagó hoy)
             elif (sap_h, monto_h) not in claves_anexo_hoy:
                 row_copy = row.copy()
                 row_copy['Abonos_Num'] = monto_h
@@ -251,7 +259,7 @@ def procesar_archivos(file_hist, file_anexo):
     nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=con_saldo_anexo.columns)
     pendientes = pd.DataFrame(pendientes_list) if pendientes_list else pd.DataFrame(columns=con_saldo_anexo.columns)
     
-    # 3. OMITIDOS EN ANEXO (Sin registro de pago)
+    # 3. OMITIDOS EN ANEXO
     omitidos = pd.DataFrame()
             
     def preparar_df_limpio(df_in):
@@ -278,9 +286,9 @@ def procesar_archivos(file_hist, file_anexo):
     tot_pendientes = pendientes['Saldo_Num'].sum() if not pendientes.empty else 0
     tot_omitidos = omitidos['Saldo_Num'].sum() if not omitidos.empty else 0
     
-    m_str = f"## 🥤 **AUDITORÍA DE FALTANTES - POPAYÁN**\n\n"
+    m_str = f"## 🥤 **AUDITORÍA DE FALTANTES - POPAYÁN (2026)**\n\n"
     m_str += f"- 🔴 **Nuevos Faltantes (Mes Actual):** {len(nuevos)} registro(s) | **${int(tot_nuevos):,}**\n"
-    m_str += f"- 🟢 **Faltantes Saldados / Pagados:** {len(saldados)} registro(s) | **${int(tot_saldados):,}**\n"
+    m_str += f"- 🟢 **Faltantes Saldados / Pagados (2026):** {len(saldados)} registro(s) | **${int(tot_saldados):,}**\n"
     m_str += f"- 🟣 **Pendientes Activos (Meses Anteriores):** {len(pendientes)} registro(s) | **${int(tot_pendientes):,}**\n"
     m_str += f"- ⚠️ **Omitidos en Anexo (Revisar Negligencia):** {len(omitidos)} registro(s) | **${int(tot_omitidos):,}**\n"
     
@@ -332,7 +340,7 @@ if ejecutar:
     if file_anexo is None:
         st.warning("⚠️ Por favor sube el Anexo del día para realizar la auditoría.")
     else:
-        with st.spinner("Procesando auditoría..."):
+        with st.spinner("Procesando auditoría 2026..."):
             m_str, fig_pie, fig_bar, df_nuevos, df_saldados, df_pendientes, df_omitidos = procesar_archivos(file_hist, file_anexo)
             
         st.markdown("---")
