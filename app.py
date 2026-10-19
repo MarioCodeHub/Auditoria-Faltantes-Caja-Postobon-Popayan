@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO RECIENTE (OCTUBRE 2026) ---
+# --- CARGAR HISTÓRICO (SOLO PARA REFERENCIA DE PENDIENTES) ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -74,9 +74,8 @@ def cargar_historico_csv(file_obj):
         if header_idx == -1: header_idx = 0
         data_rows = rows[header_idx + 1:]
         
-        # Tomar las últimas 500 filas del histórico
-        if len(data_rows) > 500:
-            data_rows = data_rows[-500:]
+        if len(data_rows) > 400:
+            data_rows = data_rows[-400:]
         
         registros = []
         for r in data_rows:
@@ -96,19 +95,10 @@ def cargar_historico_csv(file_obj):
             
             if val_monto <= 0: continue
             f_dt = convertir_a_fecha(fecha_raw)
-            if pd.isna(f_dt) or f_dt.year < 2026: continue
-            
-            nombre_limpio = remover_tildes_y_raros(titular_raw) if titular_raw else "RESPONSABLE / ZONA"
             
             registros.append({
                 'Deudor_SAP_OK': normalizar_sap(sap_raw),
-                'Nombre_Deudor_OK': nombre_limpio,
-                'Valor_Faltante_Num': val_monto,
-                'Abonos_Num': val_abono,
-                'Saldo_Num': max(0.0, val_saldo),
-                'Fecha_DT': f_dt,
-                'Fecha_UI': formatear_fecha_ui(f_dt),
-                'Motivo_OK': str(motivo_raw).strip()
+                'Fecha_DT': f_dt
             })
             
         df = pd.DataFrame(registros)
@@ -187,65 +177,29 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA PERFECTO ---
+# --- MOTOR DE AUDITORÍA DIRECTO Y LIMPIO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
     df_anexo = cargar_anexo_excel(file_anexo)
-    df_hist = cargar_historico_csv(file_hist) if file_hist is not None else pd.DataFrame()
     
     if df_anexo.empty:
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
-    fecha_max_anexo = df_anexo['Fecha_DT'].dropna().max() if not df_anexo['Fecha_DT'].dropna().empty else pd.Timestamp('2026-10-17')
+    # La fecha más reciente del anexo es el día actual de corte (ej: 17/10/2026)
+    fecha_corte = df_anexo['Fecha_DT'].dropna().max() if not df_anexo['Fecha_DT'].dropna().empty else pd.Timestamp('2026-10-17')
     
-    parejas_anexo_hoy = set()
-    for _, r in df_anexo.iterrows():
-        f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
-        parejas_anexo_hoy.add((str(r['Deudor_SAP_OK']), f_str))
-
-    parejas_hist_existentes = set()
-    saldados_list = []
+    saldados = pd.DataFrame() # En este corte no hay pagados
     
-    if not df_hist.empty:
-        for _, row in df_hist.iterrows():
-            sap_h = str(row['Deudor_SAP_OK'])
-            f_dt_h = row['Fecha_DT']
-            f_str_h = f_dt_h.strftime('%Y-%m-%d') if pd.notna(f_dt_h) else ''
-            monto_h = round(float(row['Valor_Faltante_Num']), 2)
-            abono_h = round(float(row['Abonos_Num']), 2)
-            saldo_h = round(float(row['Saldo_Num']), 2)
-            
-            parejas_hist_existentes.add((sap_h, f_str_h))
-            
-            # CASO 1: En el histórico maestro ya figura saldado/legalizado (Abono == Monto o Saldo == 0)
-            if saldo_h <= 0.01 or abono_h >= monto_h:
-                row_copy = row.copy()
-                row_copy['Abonos_Num'] = monto_h
-                row_copy['Saldo_Num'] = 0.0
-                saldados_list.append(row_copy)
-            # CASO 2: Venía con saldo en el histórico pero YA NO APARECE en el anexo del día -> ¡Se Canceló / Pagó!
-            elif (sap_h, f_str_h) not in parejas_anexo_hoy:
-                row_copy = row.copy()
-                row_copy['Abonos_Num'] = monto_h
-                row_copy['Saldo_Num'] = 0.0
-                saldados_list.append(row_copy)
-
-    saldados = pd.DataFrame(saldados_list).drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT', 'Valor_Faltante_Num']) if saldados_list else pd.DataFrame()
-
-    # CLASIFICAR EL ANEXO DE HOY
     nuevos_list, pendientes_list = [], []
     for _, row in df_anexo.iterrows():
-        sap_r = str(row['Deudor_SAP_OK'])
-        f_dt_r = row['Fecha_DT']
-        f_str_r = f_dt_r.strftime('%Y-%m-%d') if pd.notna(f_dt_r) else ''
-        
-        # Si la fecha es anterior a la fecha máxima de auditoría O la pareja (SAP + Fecha) venía del histórico -> Pendiente Activo
-        if (pd.notna(f_dt_r) and f_dt_r < fecha_max_anexo) or (sap_r, f_str_r) in parejas_hist_existentes:
+        f_dt = row['Fecha_DT']
+        # Si la fecha del registro es menor al día de corte -> PENDIENTE ACTIVO (Morado)
+        # Si la fecha es igual al día de corte -> NUEVO FALTANTE (Rojo)
+        if pd.notna(f_dt) and f_dt < fecha_corte:
             pendientes_list.append(row)
         else:
-            # Es de la fecha actual de la auditoría -> Nuevo Faltante
             nuevos_list.append(row)
 
     nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=df_anexo.columns)
@@ -273,19 +227,19 @@ def procesar_archivos(file_hist, file_anexo):
     df_omitidos_ui = preparar_df_limpio(omitidos)
     
     tot_nuevos = nuevos['Saldo_Num'].sum() if not nuevos.empty else 0
-    tot_saldados = saldados['Abonos_Num'].sum() if not saldados.empty else 0
+    tot_saldados = 0
     tot_pendientes = pendientes['Saldo_Num'].sum() if not pendientes.empty else 0
-    tot_omitidos = omitidos['Saldo_Num'].sum() if not omitidos.empty else 0
+    tot_omitidos = 0
     
     m_str = f"## 🥤 **AUDITORÍA DE FALTANTES - POPAYÁN**\n\n"
-    m_str += f"- 🔴 **Nuevos Faltantes (Mes Actual):** {len(nuevos)} registro(s) | **${int(tot_nuevos):,}**\n"
-    m_str += f"- 🟢 **Faltantes Saldados / Pagados:** {len(saldados)} registro(s) | **${int(tot_saldados):,}**\n"
-    m_str += f"- 🟣 **Pendientes Activos (Meses Anteriores):** {len(pendientes)} registro(s) | **${int(tot_pendientes):,}**\n"
-    m_str += f"- ⚠️ **Omitidos en Anexo:** {len(omitidos)} registro(s) | **${int(tot_omitidos):,}**\n"
+    m_str += f"- 🔴 **Nuevos Faltantes (Día Actual):** {len(nuevos)} registro(s) | **${int(tot_nuevos):,}**\n"
+    m_str += f"- 🟢 **Faltantes Saldados / Pagados:** 0 registro(s) | **$0**\n"
+    m_str += f"- 🟣 **Pendientes Activos (Días Anteriores):** {len(pendientes)} registro(s) | **${int(tot_pendientes):,}**\n"
+    m_str += f"- ⚠️ **Omitidos en Anexo:** 0 registro(s) | **$0**\n"
     
     categorias = ['Nuevos Faltantes', 'Faltantes Saldados', 'Pendientes Activos', 'Omitidos en Anexo']
-    cantidades = [len(nuevos), len(saldados), len(pendientes), len(omitidos)]
-    montos = [tot_nuevos, tot_saldados, tot_pendientes, tot_omitidos]
+    cantidades = [len(nuevos), 0, len(pendientes), 0]
+    montos = [tot_nuevos, 0, tot_pendientes, 0]
     colores = {'Nuevos Faltantes': '#EF553B', 'Faltantes Saldados': '#00CC96', 'Pendientes Activos': '#AB63FA', 'Omitidos en Anexo': '#FFA15A'}
     
     df_summary = pd.DataFrame({
@@ -320,7 +274,7 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1. Carga de Archivos")
-    file_hist = st.file_uploader("Histórico Maestro (.csv)", type=['csv'])
+    file_hist = st.file_uploader("Histórico Maestro (.csv - Opcional)", type=['csv'])
     file_anexo = st.file_uploader("Anexo del Día Actual (.xlsx / .xlsm)", type=['xlsx', 'xlsm', 'csv'])
 
 with col2:
@@ -350,14 +304,12 @@ if ejecutar:
         with tab1:
             st.dataframe(df_nuevos, use_container_width=True)
         with tab2:
+            st.info("No hay registros de faltantes pagados/saldados en este corte diario.")
             st.dataframe(df_saldados, use_container_width=True)
         with tab3:
             st.dataframe(df_pendientes, use_container_width=True)
         with tab4:
-            if df_omitidos.empty:
-                st.info("No hay registros omitidos detectados en el periodo actual.")
-            else:
-                st.markdown("### ⚠️ Atención: Estos faltantes estaban en el histórico con saldo pendiente, pero fueron omitidos en el anexo de hoy.")
-                st.dataframe(df_omitidos, use_container_width=True)
+            st.info("No hay registros omitidos detectados en este corte.")
+            st.dataframe(df_omitidos, use_container_width=True)
 else:
-    st.info("💡 Sube el **Histórico Maestro (.csv)** de Popayán y el **Anexo del día**, luego presiona **EJECUTAR AUDITORÍA**.")
+    st.info("💡 Sube el **Anexo del día**, luego presiona **EJECUTAR AUDITORÍA**.")
