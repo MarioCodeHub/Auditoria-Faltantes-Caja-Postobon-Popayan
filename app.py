@@ -74,7 +74,6 @@ def cargar_historico_csv(file_obj):
         if header_idx == -1: header_idx = 0
         data_rows = rows[header_idx + 1:]
         
-        # Tomar estrictamente las últimas 500 filas del histórico para evitar basura antigua
         if len(data_rows) > 500:
             data_rows = data_rows[-500:]
         
@@ -186,7 +185,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA: COMPARACIÓN DIARIA REAL ---
+# --- MOTOR DE AUDITORÍA: LÓGICA DIARIA FINA Y PRECISA ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -203,41 +202,39 @@ def procesar_archivos(file_hist, file_anexo):
         mes_actual = int(df_anexo['Fecha_DT'].dt.month.mode()[0])
         anio_actual = int(df_anexo['Fecha_DT'].dt.year.mode()[0])
         
-    # Llaves (SAP + Monto) que aparecen en el Anexo de HOY
+    # Conjunto de SAPs activos en el histórico reciente
+    saps_historicos = set(df_hist['Deudor_SAP_OK'].astype(str)) if not df_hist.empty else set()
+    
+    # Llaves exactas (SAP + Monto) presentes hoy en el Anexo
     claves_anexo_hoy = set(zip(df_anexo['Deudor_SAP_OK'], df_anexo['Valor_Faltante_Num'].round(2)))
     
-    # 1. DETECTAR SALDADOS / PAGADOS: Faltantes del histórico reciente que YA NO ESTÁN en el anexo de hoy
+    # 1. SALDADOS / PAGADOS: Faltantes del histórico cuyo SAP ya no tiene deudas pendientes en el anexo de hoy
     saldados_list = []
-    pendientes_hist_claves = set()
-    
     if not df_hist.empty:
-        # Filtrar solo histórico pendiente real (saldo > 0)
         hist_pendientes = df_hist[df_hist['Saldo_Num'] > 0.01].copy()
+        saps_en_anexo_hoy = set(df_anexo['Deudor_SAP_OK'].astype(str))
         
         for _, row in hist_pendientes.iterrows():
             sap_h = str(row['Deudor_SAP_OK'])
             monto_h = round(float(row['Valor_Faltante_Num']), 2)
             
-            # Si estaba pendiente en el histórico pero YA NO APARECE EN EL ANEXO DE HOY -> ¡SE PAGÓ!
-            if (sap_h, monto_h) not in claves_anexo_hoy:
+            # Si el SAP estaba en el histórico pero ya no está en el anexo de hoy, se canceló/pagó por completo
+            if sap_h not in saps_en_anexo_hoy:
                 row_copy = row.copy()
                 row_copy['Abonos_Num'] = monto_h
                 row_copy['Saldo_Num'] = 0.0
                 saldados_list.append(row_copy)
-            else:
-                pendientes_hist_claves.add((sap_h, monto_h))
 
     saldados = pd.DataFrame(saldados_list).drop_duplicates(subset=['Deudor_SAP_OK', 'Valor_Faltante_Num']) if saldados_list else pd.DataFrame()
 
-    # 2. CLASIFICAR EL ANEXO DE HOY: Nuevos vs Pendientes Activos
-    con_saldo_anexo = df_anexo[df_anexo['Saldo_Num'] > 0.01].copy()
-    
+    # 2. CLASIFICAR ANEXO DE HOY: Nuevos vs Pendientes Activos (incluyendo abonos parciales como el de Carlos Lebaza)
     nuevos_list, pendientes_list = [], []
-    for _, row in con_saldo_anexo.iterrows():
+    for _, row in df_anexo.iterrows():
         sap_r = str(row['Deudor_SAP_OK'])
         val_r = round(float(row['Valor_Faltante_Num']), 2)
         
-        if (sap_r, val_r) in pendientes_hist_claves:
+        # Si el SAP ya existía en el histórico, es un PENDIENTE ACTIVO (aunque su monto haya bajado por abono parcial)
+        if sap_r in saps_historicos or (sap_r, val_r) in claves_anexo_hoy:
             pendientes_list.append(row)
         else:
             if row['Fecha_DT'].month == mes_actual and row['Fecha_DT'].year == anio_actual:
@@ -245,8 +242,8 @@ def procesar_archivos(file_hist, file_anexo):
             else:
                 pendientes_list.append(row)
 
-    nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=con_saldo_anexo.columns)
-    pendientes = pd.DataFrame(pendientes_list) if pendientes_list else pd.DataFrame(columns=con_saldo_anexo.columns)
+    nuevos = pd.DataFrame(nuevos_list) if nuevos_list else pd.DataFrame(columns=df_anexo.columns)
+    pendientes = pd.DataFrame(pendientes_list) if pendientes_list else pd.DataFrame(columns=df_anexo.columns)
     
     omitidos = pd.DataFrame()
             
@@ -328,7 +325,7 @@ if ejecutar:
     if file_anexo is None:
         st.warning("⚠️ Por favor sube el Anexo del día para realizar la auditoría.")
     else:
-        with st.spinner("Procesando auditoría diaria..."):
+        with st.spinner("Procesando auditoría..."):
             m_str, fig_pie, fig_bar, df_nuevos, df_saldados, df_pendientes, df_omitidos = procesar_archivos(file_hist, file_anexo)
             
         st.markdown("---")
