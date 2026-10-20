@@ -74,9 +74,8 @@ def cargar_historico_csv(file_obj):
         if header_idx == -1: header_idx = 0
         data_rows = rows[header_idx + 1:]
         
-        # Tomar las últimas 600 filas del histórico reciente
-        if len(data_rows) > 600:
-            data_rows = data_rows[-600:]
+        if len(data_rows) > 800:
+            data_rows = data_rows[-800:]
         
         registros = []
         for r in data_rows:
@@ -107,7 +106,8 @@ def cargar_historico_csv(file_obj):
                 'Saldo_Num': max(0.0, val_saldo),
                 'Fecha_DT': f_dt,
                 'Fecha_UI': formatear_fecha_ui(f_dt),
-                'Motivo_OK': str(motivo_raw).strip()
+                'Motivo_OK': str(motivo_raw).strip(),
+                'Es_Saldado_Hist': (str(saldo_raw).strip() == '-' or val_saldo <= 0.01 or val_abono >= val_monto)
             })
             
         df = pd.DataFrame(registros)
@@ -186,7 +186,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CRUZADA (HISTÓRICO VS ANEXO) ---
+# --- MOTOR DE AUDITORÍA AVANZADO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -199,27 +199,29 @@ def procesar_archivos(file_hist, file_anexo):
         
     fecha_corte = df_anexo['Fecha_DT'].dropna().max() if not df_anexo['Fecha_DT'].dropna().empty else pd.Timestamp('2026-10-19')
     
-    # Llaves (SAP + Fecha) presentes hoy en el Anexo
+    # Identificar parejas (SAP + Fecha) presentes hoy en el Anexo
     claves_anexo_hoy = set()
     for _, r in df_anexo.iterrows():
         f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
         claves_anexo_hoy.add((str(r['Deudor_SAP_OK']), f_str))
-        
+
     # 1. DETECTAR FALTANTES SALDADOS / PAGADOS
     saldados_list = []
     if not df_hist.empty:
-        hist_pendientes = df_hist[df_hist['Saldo_Num'] > 0.01].drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT'])
-        for _, row in hist_pendientes.iterrows():
+        # Buscamos registros en el histórico que estaban pendientes y cuyo estado cambió a saldado o ya no figuran en el anexo de hoy
+        hist_vigentes = df_hist[df_hist['Saldo_Num'] > 0.01].copy()
+        
+        for _, row in hist_vigentes.iterrows():
             sap_h = str(row['Deudor_SAP_OK'])
             f_dt_h = row['Fecha_DT']
             f_str_h = f_dt_h.strftime('%Y-%m-%d') if pd.notna(f_dt_h) else ''
             monto_h = round(float(row['Valor_Faltante_Num']), 2)
             
-            # Si estaba pendiente en el histórico pero YA NO APARECE EN EL ANEXO DE HOY (ni por SAP+Fecha) -> ¡PAGADO TOTAL!
-            if (sap_h, f_str_h) not in claves_anexo_hoy:
-                # Verificamos que el SAP tampoco siga debiendo nada o que su deuda haya desaparecido
-                saps_en_anexo = set(df_anexo['Deudor_SAP_OK'].astype(str))
-                if sap_h not in saps_en_anexo:
+            # Si el registro figura como saldado en el histórico o ya no está en el anexo actual
+            if row['Es_Saldado_Hist'] or (sap_h, f_str_h) not in claves_anexo_hoy:
+                # Comprobamos que no siga activo con saldo en el anexo de hoy
+                match_anexo = df_anexo[(df_anexo['Deudor_SAP_OK'] == sap_h) & (df_anexo['Fecha_DT'] == f_dt_h)]
+                if match_anexo.empty:
                     row_copy = row.copy()
                     row_copy['Abonos_Num'] = monto_h
                     row_copy['Saldo_Num'] = 0.0
@@ -227,7 +229,7 @@ def procesar_archivos(file_hist, file_anexo):
 
     saldados = pd.DataFrame(saldados_list).drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT']) if saldados_list else pd.DataFrame()
 
-    # 2. CLASIFICAR ANEXO DE HOY: Nuevos vs Pendientes Activos
+    # 2. CLASIFICAR ANEXO DE HOY: Nuevos vs Pendientes Activos (incluyendo abonos parciales)
     nuevos_list, pendientes_list = [], []
     
     parejas_hist = set()
@@ -241,7 +243,7 @@ def procesar_archivos(file_hist, file_anexo):
         sap_r = str(row['Deudor_SAP_OK'])
         f_str_r = f_dt.strftime('%Y-%m-%d') if pd.notna(f_dt) else ''
         
-        # Si la fecha es anterior al día de corte O la pareja SAP+Fecha ya existía en el histórico -> PENDIENTE ACTIVO
+        # Si la fecha es anterior al día de corte O la pareja SAP+Fecha ya existía en el histórico (incluso con abono parcial) -> PENDIENTE ACTIVO
         if (pd.notna(f_dt) and f_dt < fecha_corte) or (sap_r, f_str_r) in parejas_hist:
             pendientes_list.append(row)
         else:
@@ -331,7 +333,7 @@ if ejecutar:
     if file_anexo is None:
         st.warning("⚠️ Por favor sube el Anexo del día para realizar la auditoría.")
     else:
-        with st.spinner("Procesando auditoría inteligente..."):
+        with st.spinner("Procesando auditoría y conciliación avanzada..."):
             m_str, fig_pie, fig_bar, df_nuevos, df_saldados, df_pendientes, df_omitidos = procesar_archivos(file_hist, file_anexo)
             
         st.markdown("---")
