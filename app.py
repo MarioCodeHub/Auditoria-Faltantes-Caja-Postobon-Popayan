@@ -52,6 +52,43 @@ def formatear_fecha_ui(val_dt):
     if pd.isna(val_dt): return 'Sin Fecha'
     return val_dt.strftime('%d/%m/%Y')
 
+# ESCANEO INTELIGENTE PARA EXTRAER NOMBRES REALES EN TEXTO
+PALABRAS_PROHIBIDAS = [
+    'POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'TESORERIA', 'CARTERA', 
+    'VENTAS', 'LOGISTICA', 'SI', 'NO', 'NONE', 'NAN', 'RESPONSABLE / ZONA',
+    'PASE A CARTERA', 'PENDIENTE', 'PAGO POR VERIFICAR'
+]
+
+def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
+    # 1. Probar en la columna de titular/responsable
+    if col_titular and col_titular in row.index and pd.notna(row[col_titular]):
+        txt = remover_tildes_y_raros(row[col_titular])
+        if txt and not txt.isdigit() and len(txt) > 2 and txt not in PALABRAS_PROHIBIDAS:
+            return txt
+
+    # 2. Probar en la columna de cliente / observación
+    if col_cliente and col_cliente in row.index and pd.notna(row[col_cliente]):
+        txt = remover_tildes_y_raros(row[col_cliente])
+        if txt and not txt.isdigit() and len(txt) > 2 and txt not in PALABRAS_PROHIBIDAS:
+            # Si dice "CLIENTE 100259...", extraer la parte del nombre
+            txt_clean = re.sub(r'^CLIENTE\s+\d+\s*', '', txt).strip()
+            if txt_clean and not txt_clean.isdigit() and len(txt_clean) > 2:
+                return txt_clean
+            elif txt and not txt.isdigit():
+                return txt
+
+    # 3. Escaneo exhaustivo celda por celda en la fila buscando el primer texto con letras reales
+    for val in row.values:
+        if pd.notna(val):
+            txt = remover_tildes_y_raros(val)
+            # Debe tener letras, no ser puramente números, ni fechas, ni montos
+            if txt and not txt.isdigit() and not re.match(r'^\d{2}/\d{2}/\d{4}$', txt) and len(txt) > 3:
+                if txt not in PALABRAS_PROHIBIDAS and not txt.startswith('31000'):
+                    if 'PAGO' not in txt and 'FACTURA' not in txt and 'DIFERENCIA' not in txt:
+                        return txt
+                        
+    return 'RESPONSABLE / ZONA'
+
 
 # --- CARGAR HISTÓRICO CSV ---
 def cargar_historico_csv(file_obj):
@@ -69,7 +106,7 @@ def cargar_historico_csv(file_obj):
         header_idx = -1
         for idx, r in enumerate(rows):
             row_str = " ".join([str(c).upper() for c in r])
-            if "IMPORTE" in row_str or "SALDO" in row_str or "TITULAR" in row_str:
+            if "IMPORTE" in row_str or "SALDO" in row_str or "TITULAR" in row_str or "MOTIVO" in row_str:
                 header_idx = idx
                 break
                 
@@ -86,9 +123,11 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        # Mapeo exacto basado en la estructura de Postobón
-        col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c or 'CODIGO' in c), None)
-        col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'TRANSPORTADOR' in c), None)
+        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c or 'DUEDOR' in c or 'DEUDOR' in c), None)
+        if not col_sap:
+            col_sap = next((c for c in df.columns if 'CODIGO' in c or 'SAP' in c), None)
+            
+        col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c or 'TRANSPORTADOR' in c), None)
         col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
         col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), None)
@@ -98,16 +137,7 @@ def cargar_historico_csv(file_obj):
         
         nombres_extraidos = []
         for _, row in df.iterrows():
-            nom_tit = remover_tildes_y_raros(row[col_titular]) if col_titular and pd.notna(row[col_titular]) else ''
-            nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
-            
-            if nom_tit and nom_tit not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                nombre_ok = nom_tit
-            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                nombre_ok = nom_cli
-            else:
-                nombre_ok = 'RESPONSABLE / ZONA'
-                
+            nombre_ok = extraer_nombre_real_fila(row, col_titular, col_cliente)
             nombres_extraidos.append(nombre_ok)
             
         df['Nombre_Deudor_OK'] = nombres_extraidos
@@ -124,7 +154,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON NOMBRES DE TITULAR ZONA Y DUEDOR SAP PERFECTOS ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -146,10 +176,9 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        # Búsqueda estricta por las columnas que vimos en la foto:
-        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c), None)
+        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c or 'DUEDOR' in c or 'DEUDOR' in c), None)
         if not col_sap:
-            col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c), None)
+            col_sap = next((c for c in df.columns if 'CODIGO' in c or 'SAP' in c), None)
             
         col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c or 'TRANSPORTADOR' in c), None)
         col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
@@ -171,16 +200,7 @@ def cargar_anexo_excel(file_obj):
         
         nombres_finales, saps_finales, mot_finales = [], [], []
         for _, row in df.iterrows():
-            nom_tit = remover_tildes_y_raros(row[col_titular]) if col_titular and pd.notna(row[col_titular]) else ''
-            nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
-            
-            if nom_tit and nom_tit not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                nombre_ok = nom_tit
-            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                nombre_ok = nom_cli
-            else:
-                nombre_ok = 'RESPONSABLE / ZONA'
-            
+            nombre_ok = extraer_nombre_real_fila(row, col_titular, col_cliente)
             c_code = normalizar_sap(row[col_sap]) if col_sap and pd.notna(row[col_sap]) else '1'
             motivo = str(row[col_motivo]).strip() if col_motivo and pd.notna(row[col_motivo]) else ''
             
@@ -255,7 +275,7 @@ def procesar_archivos(file_hist, file_anexo):
                 elif row_f['Abonos_Num'] > 0:
                     row_f['Valor_Faltante_Num'] = row_f['Saldo_Num'] + row_f['Abonos_Num']
                     
-                if r_hist['Nombre_Deudor_OK'] and r_hist['Nombre_Deudor_OK'] not in ['POSTOBON POPAYAN', 'RESPONSABLE / ZONA']:
+                if r_hist['Nombre_Deudor_OK'] and not r_hist['Nombre_Deudor_OK'].isdigit() and r_hist['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
                     row_f['Nombre_Deudor_OK'] = r_hist['Nombre_Deudor_OK']
                     
             activos_list.append(row_f)
