@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO CSV ---
+# --- CARGAR HISTÓRICO CSV OMITIENDO OPERACK ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -86,16 +86,39 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'CLIENTE' in c or 'SAP' in c or 'DUEDOR' in c), df.columns[2] if len(df.columns) > 2 else None)
-        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c), df.columns[3] if len(df.columns) > 3 else None)
-        col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[4] if len(df.columns) > 4 else None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), df.columns[7] if len(df.columns) > 7 else None)
-        col_abono = next((c for c in df.columns if 'ABONO' in c), df.columns[8] if len(df.columns) > 8 else None)
-        col_saldo = next((c for c in df.columns if 'SALDO' in c), df.columns[9] if len(df.columns) > 9 else None)
-        col_motivo = next((c for c in df.columns if 'MOTIVO' in c), df.columns[11] if len(df.columns) > 11 else None)
+        col_sap = next((c for c in df.columns if 'DEUDOR SAP' in c or ('SAP' in c and 'OPERACK' not in c)), df.columns[2] if len(df.columns) > 2 else None)
+        col_resp = next((c for c in df.columns if 'RESPONSABLE' in c or 'TITULAR' in c or 'TRANSPORTADOR' in c), None)
+        col_cliente = next((c for c in df.columns if 'CLIENTE' in c and 'DEUDOR' not in c and 'OPERACK' not in c), None)
+        col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
+        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
+        col_abono = next((c for c in df.columns if 'ABONO' in c), None)
+        col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
+        col_motivo = next((c for c in df.columns if 'MOTIVO' in c), None)
         
+        nombres_extraidos = []
+        for _, row in df.iterrows():
+            nom_resp = remover_tildes_y_raros(row[col_resp]) if col_resp and pd.notna(row[col_resp]) else ''
+            nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
+            
+            # Si el nombre extraído es "POSTOBON POPAYAN" o similar, buscar alternativas
+            if nom_resp and nom_resp not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN']:
+                nombre_ok = nom_resp
+            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN']:
+                nombre_ok = nom_cli
+            else:
+                # Si fallan las columnas nombradas, buscar texto en la columna siguiente a SAP
+                nombre_ok = 'RESPONSABLE / ZONA'
+                if col_sap in df.columns:
+                    idx_sap = df.columns.get_loc(col_sap)
+                    if idx_sap + 1 < len(df.columns):
+                        val_adj = remover_tildes_y_raros(row.iloc[idx_sap + 1])
+                        if val_adj and val_adj not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
+                            nombre_ok = val_adj
+                            
+            nombres_extraidos.append(nombre_ok)
+            
+        df['Nombre_Deudor_OK'] = nombres_extraidos
         df['Deudor_SAP_OK'] = df[col_sap].apply(normalizar_sap) if col_sap else '1'
-        df['Nombre_Deudor_OK'] = df[col_nombre].apply(remover_tildes_y_raros) if col_nombre else 'RESPONSABLE / ZONA'
         df['Valor_Faltante_Num'] = df[col_valor].apply(limpiar_monto) if col_valor else 0.0
         df['Abonos_Num'] = df[col_abono].apply(limpiar_monto) if col_abono else 0.0
         df['Saldo_Num'] = df[col_saldo].apply(limpiar_monto) if col_saldo else (df['Valor_Faltante_Num'] - df['Abonos_Num'])
@@ -108,7 +131,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ---
+# --- CARGAR ANEXO EXCEL OMITIENDO OPERACK ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -130,9 +153,9 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_client_name = next((c for c in df.columns if 'NOMBRE' in c and 'CLIENTE' in c), None)
-        col_trans_code = next((c for c in df.columns if 'DUEDOR SAP' in c or 'SAP' in c or 'CODIGO' in c), None)
-        col_trans_name = next((c for c in df.columns if 'TITULAR' in c or 'TRANSPORTADOR' in c or 'RESPONSABLE' in c or 'ZONA' in c), None)
+        col_sap = next((c for c in df.columns if 'DEUDOR SAP' in c or ('SAP' in c and 'OPERACK' not in c)), None)
+        col_resp = next((c for c in df.columns if 'RESPONSABLE' in c or 'TITULAR' in c or 'TRANSPORTADOR' in c), None)
+        col_cliente = next((c for c in df.columns if 'CLIENTE' in c and 'DEUDOR' not in c and 'OPERACK' not in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
         col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
@@ -151,20 +174,26 @@ def cargar_anexo_excel(file_obj):
         
         nombres_finales, saps_finales, mot_finales = [], [], []
         for _, row in df.iterrows():
-            t_name = remover_tildes_y_raros(row[col_trans_name]) if col_trans_name and pd.notna(row[col_trans_name]) else ''
-            c_name = remover_tildes_y_raros(row[col_client_name]) if col_client_name and pd.notna(row[col_client_name]) else ''
+            nom_resp = remover_tildes_y_raros(row[col_resp]) if col_resp and pd.notna(row[col_resp]) else ''
+            nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
             
-            if t_name and t_name not in ['POSTOBON POPAYAN', 'POSTOBON', 'TRANSPORTADOR', '']:
-                nombre_str = t_name
-            elif c_name and c_name not in ['POSTOBON POPAYAN', 'POSTOBON', 'CLIENTE', '']:
-                nombre_str = c_name
+            if nom_resp and nom_resp not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'TRANSPORTADOR', '']:
+                nombre_ok = nom_resp
+            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'CLIENTE', '']:
+                nombre_ok = nom_cli
             else:
-                nombre_str = t_name if t_name else (c_name if c_name else 'RESPONSABLE / ZONA')
+                nombre_ok = 'RESPONSABLE / ZONA'
+                if col_sap in df.columns:
+                    idx_sap = df.columns.get_loc(col_sap)
+                    if idx_sap + 1 < len(df.columns):
+                        val_adj = remover_tildes_y_raros(row.iloc[idx_sap + 1])
+                        if val_adj and val_adj not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
+                            nombre_ok = val_adj
             
-            c_code = normalizar_sap(row[col_trans_code]) if col_trans_code and pd.notna(row[col_trans_code]) else '1'
+            c_code = normalizar_sap(row[col_sap]) if col_sap and pd.notna(row[col_sap]) else '1'
             motivo = str(row[col_motivo]).strip() if col_motivo and pd.notna(row[col_motivo]) else ''
             
-            nombres_finales.append(nombre_str)
+            nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
             mot_finales.append(motivo)
             
@@ -179,7 +208,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA LÓGICO Y EXACTO ---
+# --- MOTOR DE AUDITORÍA ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -193,7 +222,7 @@ def procesar_archivos(file_hist, file_anexo):
     fechas_validas = df_anexo['Fecha_DT'].dropna()
     fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-23')
 
-    # Diccionario del Histórico para cruce exacto por (SAP, Fecha)
+    # Diccionario del Histórico
     mapa_hist_completo = {}
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
@@ -201,13 +230,11 @@ def procesar_archivos(file_hist, file_anexo):
             f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
             monto = round(r['Valor_Faltante_Num'], 2)
             mapa_hist_completo[(sap, f_str, monto)] = r
-            # También guardamos por (SAP, Fecha) para abonos parciales
             mapa_hist_completo[(sap, f_str)] = r
 
     # 1. PROCESAR REGISTROS DEL ANEXO DE HOY
     saldados_list = []
     activos_list = []
-    
     keys_atendidas_hoy = set()
 
     for _, row in df_anexo.iterrows():
@@ -222,18 +249,15 @@ def procesar_archivos(file_hist, file_anexo):
         
         row_f = row.copy()
         
-        # Si el saldo es 0 o está pagado hoy
         if row_f['Saldo_Num'] <= 0.01 or row_f['Abonos_Num'] >= row_f['Valor_Faltante_Num']:
             row_f['Abonos_Num'] = row_f['Valor_Faltante_Num']
             row_f['Saldo_Num'] = 0.0
             saldados_list.append(row_f)
         else:
-            # Si viene con saldo activo, cruzamos con el histórico para recuperar el Valor Inicial si hubo abono parcial
             if key_generic in mapa_hist_completo:
                 r_hist = mapa_hist_completo[key_generic]
                 v_inicial_hist = r_hist['Valor_Faltante_Num']
                 
-                # Ejemplo: Eduar Montenegro de $1.660.881 con abono de $700.000 -> saldo $960.881
                 if v_inicial_hist > row_f['Valor_Faltante_Num']:
                     row_f['Valor_Faltante_Num'] = v_inicial_hist
                     row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
@@ -248,7 +272,6 @@ def procesar_archivos(file_hist, file_anexo):
     df_activos = pd.DataFrame(activos_list) if activos_list else pd.DataFrame(columns=df_anexo.columns)
     saldados_anexo = pd.DataFrame(saldados_list) if saldados_list else pd.DataFrame(columns=df_anexo.columns)
 
-    # Separar Activos en Nuevos Faltantes (Día Actual) vs Pendientes Activos (Días Anteriores)
     if not df_activos.empty and pd.notna(fecha_dia_actual):
         es_dia_actual = df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()
         nuevos = df_activos[es_dia_actual].copy()
@@ -257,7 +280,7 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 2. IDENTIFICAR EN EL HISTÓRICO LOS REGISTROS QUE YA NO APARECEN HOY (FUERAN PAGADOS)
+    # 2. IDENTIFICAR EN EL HISTÓRICO LOS REGISTROS QUE YA NO APARECEN HOY (SALDADOS / PAGADOS)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -265,7 +288,6 @@ def procesar_archivos(file_hist, file_anexo):
             f_str_h = r_hist['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r_hist['Fecha_DT']) else ''
             monto_h = round(r_hist['Valor_Faltante_Num'], 2)
             
-            # Si el faltante estaba pendiente en el histórico pero YA NO viene en el anexo de hoy, FUE PAGADO / SALDADO
             if (sap_h, f_str_h) not in keys_atendidas_hoy and (sap_h, f_str_h, monto_h) not in keys_atendidas_hoy:
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
@@ -274,11 +296,9 @@ def procesar_archivos(file_hist, file_anexo):
 
     saldados_hist = pd.DataFrame(saldados_hist_list) if saldados_hist_list else pd.DataFrame(columns=df_anexo.columns)
     
-    # Unir todos los saldados/pagados
     saldados = pd.concat([saldados_anexo, saldados_hist], ignore_index=True) if not saldados_hist.empty else saldados_anexo
     saldados = saldados.drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT', 'Valor_Faltante_Num']) if not saldados.empty else saldados
 
-    # Pestaña Omitidos queda limpia
     omitidos = pd.DataFrame(columns=df_anexo.columns)
             
     def preparar_df_ui(df_in):
