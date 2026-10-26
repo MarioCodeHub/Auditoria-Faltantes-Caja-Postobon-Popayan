@@ -53,7 +53,7 @@ def formatear_fecha_ui(val_dt):
     return val_dt.strftime('%d/%m/%Y')
 
 
-# --- CARGAR HISTÓRICO CSV OMITIENDO OPERACK ---
+# --- CARGAR HISTÓRICO CSV ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -69,7 +69,7 @@ def cargar_historico_csv(file_obj):
         header_idx = -1
         for idx, r in enumerate(rows):
             row_str = " ".join([str(c).upper() for c in r])
-            if "VALOR" in row_str or "IMPORTE" in row_str or "SALDO" in row_str:
+            if "IMPORTE" in row_str or "SALDO" in row_str or "TITULAR" in row_str:
                 header_idx = idx
                 break
                 
@@ -86,35 +86,28 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'DEUDOR SAP' in c or ('SAP' in c and 'OPERACK' not in c)), df.columns[2] if len(df.columns) > 2 else None)
-        col_resp = next((c for c in df.columns if 'RESPONSABLE' in c or 'TITULAR' in c or 'TRANSPORTADOR' in c), None)
-        col_cliente = next((c for c in df.columns if 'CLIENTE' in c and 'DEUDOR' not in c and 'OPERACK' not in c), None)
+        # Mapeo exacto basado en la estructura de Postobón
+        col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c or 'CODIGO' in c), None)
+        col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'TRANSPORTADOR' in c), None)
+        col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
+        col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
         col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
         col_motivo = next((c for c in df.columns if 'MOTIVO' in c), None)
         
         nombres_extraidos = []
         for _, row in df.iterrows():
-            nom_resp = remover_tildes_y_raros(row[col_resp]) if col_resp and pd.notna(row[col_resp]) else ''
+            nom_tit = remover_tildes_y_raros(row[col_titular]) if col_titular and pd.notna(row[col_titular]) else ''
             nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
             
-            # Si el nombre extraído es "POSTOBON POPAYAN" o similar, buscar alternativas
-            if nom_resp and nom_resp not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN']:
-                nombre_ok = nom_resp
-            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN']:
+            if nom_tit and nom_tit not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
+                nombre_ok = nom_tit
+            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
                 nombre_ok = nom_cli
             else:
-                # Si fallan las columnas nombradas, buscar texto en la columna siguiente a SAP
                 nombre_ok = 'RESPONSABLE / ZONA'
-                if col_sap in df.columns:
-                    idx_sap = df.columns.get_loc(col_sap)
-                    if idx_sap + 1 < len(df.columns):
-                        val_adj = remover_tildes_y_raros(row.iloc[idx_sap + 1])
-                        if val_adj and val_adj not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                            nombre_ok = val_adj
-                            
+                
             nombres_extraidos.append(nombre_ok)
             
         df['Nombre_Deudor_OK'] = nombres_extraidos
@@ -131,7 +124,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL OMITIENDO OPERACK ---
+# --- CARGAR ANEXO EXCEL CON NOMBRES DE TITULAR ZONA Y DUEDOR SAP PERFECTOS ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -143,7 +136,7 @@ def cargar_anexo_excel(file_obj):
         header_idx = 0
         for idx, row in df_raw.iterrows():
             row_str = [str(c).upper().replace('\n', ' ').strip() for c in row if pd.notna(c)]
-            if any("VALOR" in c or "IMPORTE" in c for c in row_str) and any("FECHA" in c for c in row_str):
+            if any("IMPORTE" in c or "VALOR" in c for c in row_str) and any("FECHA" in c for c in row_str):
                 header_idx = idx
                 break
                 
@@ -153,11 +146,15 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'DEUDOR SAP' in c or ('SAP' in c and 'OPERACK' not in c)), None)
-        col_resp = next((c for c in df.columns if 'RESPONSABLE' in c or 'TITULAR' in c or 'TRANSPORTADOR' in c), None)
-        col_cliente = next((c for c in df.columns if 'CLIENTE' in c and 'DEUDOR' not in c and 'OPERACK' not in c), None)
+        # Búsqueda estricta por las columnas que vimos en la foto:
+        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c), None)
+        if not col_sap:
+            col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c), None)
+            
+        col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c or 'TRANSPORTADOR' in c), None)
+        col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
-        col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), None)
+        col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), None)
         col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
         col_motivo = next((c for c in df.columns if 'MOTIVO' in c), None)
@@ -174,21 +171,15 @@ def cargar_anexo_excel(file_obj):
         
         nombres_finales, saps_finales, mot_finales = [], [], []
         for _, row in df.iterrows():
-            nom_resp = remover_tildes_y_raros(row[col_resp]) if col_resp and pd.notna(row[col_resp]) else ''
+            nom_tit = remover_tildes_y_raros(row[col_titular]) if col_titular and pd.notna(row[col_titular]) else ''
             nom_cli = remover_tildes_y_raros(row[col_cliente]) if col_cliente and pd.notna(row[col_cliente]) else ''
             
-            if nom_resp and nom_resp not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'TRANSPORTADOR', '']:
-                nombre_ok = nom_resp
-            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'CLIENTE', '']:
+            if nom_tit and nom_tit not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
+                nombre_ok = nom_tit
+            elif nom_cli and nom_cli not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
                 nombre_ok = nom_cli
             else:
                 nombre_ok = 'RESPONSABLE / ZONA'
-                if col_sap in df.columns:
-                    idx_sap = df.columns.get_loc(col_sap)
-                    if idx_sap + 1 < len(df.columns):
-                        val_adj = remover_tildes_y_raros(row.iloc[idx_sap + 1])
-                        if val_adj and val_adj not in ['POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', '']:
-                            nombre_ok = val_adj
             
             c_code = normalizar_sap(row[col_sap]) if col_sap and pd.notna(row[col_sap]) else '1'
             motivo = str(row[col_motivo]).strip() if col_motivo and pd.notna(row[col_motivo]) else ''
