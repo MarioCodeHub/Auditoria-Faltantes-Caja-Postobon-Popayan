@@ -108,7 +108,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON DETALLE DE NOMBRES ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -154,7 +154,6 @@ def cargar_anexo_excel(file_obj):
             t_name = remover_tildes_y_raros(row[col_trans_name]) if col_trans_name and pd.notna(row[col_trans_name]) else ''
             c_name = remover_tildes_y_raros(row[col_client_name]) if col_client_name and pd.notna(row[col_client_name]) else ''
             
-            # Priorizamos el nombre del transportador/titular real, si no existe usamos el cliente, o ambos
             nombre_str = t_name if (t_name and "POSTOBON" not in t_name) else (c_name if (c_name and "POSTOBON" not in c_name) else "RESPONSABLE / ZONA")
             
             c_code = normalizar_sap(row[col_trans_code]) if col_trans_code and pd.notna(row[col_trans_code]) else '1'
@@ -175,7 +174,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA ---
+# --- MOTOR DE AUDITORÍA UNIFICADO Y CON NOMBRES REALES ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -189,7 +188,44 @@ def procesar_archivos(file_hist, file_anexo):
     fechas_validas = df_anexo['Fecha_DT'].dropna()
     fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-23')
 
-    # 1. SALDADOS QUE LLEGARON HOY EN EL ANEXO (Saldo == 0)
+    # Diccionario global para rescatar nombres reales basados en SAP + Fecha
+    mapa_nombres_reales = {}
+    for _, r in df_anexo.iterrows():
+        sap = str(r['Deudor_SAP_OK']).strip()
+        f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
+        nombre = r['Nombre_Deudor_OK']
+        if nombre and nombre not in ['POSTOBON POPAYAN', 'RESPONSABLE / ZONA', 'CLIENTE']:
+            mapa_nombres_reales[(sap, f_str)] = nombre
+
+    if not df_hist.empty:
+        for _, r in df_hist.iterrows():
+            sap = str(r['Deudor_SAP_OK']).strip()
+            f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
+            nombre = r['Nombre_Deudor_OK']
+            if nombre and nombre not in ['POSTOBON POPAYAN', 'RESPONSABLE / ZONA', 'CLIENTE']:
+                if (sap, f_str) not in mapa_nombres_reales:
+                    mapa_nombres_reales[(sap, f_str)] = nombre
+
+    def asignar_nombre_real(df_in):
+        if df_in is None or df_in.empty: return df_in
+        df_out = df_in.copy()
+        nombres_actualizados = []
+        for _, r in df_out.iterrows():
+            sap = str(r['Deudor_SAP_OK']).strip()
+            f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
+            key = (sap, f_str)
+            
+            nom_actual = str(r.get('Nombre_Deudor_OK', '')).strip()
+            if key in mapa_nombres_reales:
+                nombres_actualizados.append(mapa_nombres_reales[key])
+            elif nom_actual and nom_actual not in ['POSTOBON POPAYAN', 'RESPONSABLE / ZONA', 'CLIENTE']:
+                nombres_actualizados.append(nom_actual)
+            else:
+                nombres_actualizados.append('RESPONSABLE / ZONA')
+        df_out['Nombre_Deudor_OK'] = nombres_actualizados
+        return df_out
+
+    # 1. FALTANTES SALDADOS QUE LLEGARON HOY EN EL ANEXO (Saldo == 0)
     saldados_anexo = df_anexo[df_anexo['Saldo_Num'] <= 0.01].copy()
     if not saldados_anexo.empty:
         saldados_anexo['Abonos_Num'] = saldados_anexo['Valor_Faltante_Num']
@@ -217,8 +253,6 @@ def procesar_archivos(file_hist, file_anexo):
             row_f['Valor_Faltante_Num'] = r_hist['Valor_Faltante_Num']
             row_f['Abonos_Num'] = r_hist['Abonos_Num']
             row_f['Saldo_Num'] = max(0.0, r_hist['Valor_Faltante_Num'] - r_hist['Abonos_Num'])
-            if r_hist['Nombre_Deudor_OK'] and r_hist['Nombre_Deudor_OK'] != 'RESPONSABLE / ZONA':
-                row_f['Nombre_Deudor_OK'] = r_hist['Nombre_Deudor_OK']
             
         activos_procesados.append(row_f)
 
@@ -256,6 +290,11 @@ def procesar_archivos(file_hist, file_anexo):
 
     saldados_extra = pd.DataFrame(saldados_list_extra) if saldados_list_extra else pd.DataFrame(columns=df_anexo.columns)
     saldados = pd.concat([saldados_anexo, saldados_extra], ignore_index=True) if not saldados_extra.empty else saldados_anexo
+
+    # Aplicar asignación de nombre real a todos los dataframes de salida
+    nuevos = asignar_nombre_real(nuevos)
+    saldados = asignar_nombre_real(saldados)
+    pendientes = asignar_nombre_real(pendientes)
     omitidos = pd.DataFrame(columns=df_anexo.columns)
             
     def preparar_df_ui(df_in):
