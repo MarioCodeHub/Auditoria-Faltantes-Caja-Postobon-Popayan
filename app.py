@@ -87,7 +87,7 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
         col_sap = next((c for c in df.columns if 'CLIENTE' in c or 'SAP' in c or 'DUEDOR' in c), df.columns[2] if len(df.columns) > 2 else None)
-        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c or 'RESPONSABLE' in c), df.columns[3] if len(df.columns) > 3 else None)
+        col_nombre = next((c for c in df.columns if 'NOMBRE' in c or 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c), df.columns[3] if len(df.columns) > 3 else None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), df.columns[4] if len(df.columns) > 4 else None)
         col_valor = next((c for c in df.columns if 'VALOR' in c or 'IMPORTE' in c), df.columns[7] if len(df.columns) > 7 else None)
         col_abono = next((c for c in df.columns if 'ABONO' in c), df.columns[8] if len(df.columns) > 8 else None)
@@ -108,7 +108,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON EXTRACCIÓN EXTRA LIMPIA DE NOMBRES ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -154,7 +154,6 @@ def cargar_anexo_excel(file_obj):
             t_name = remover_tildes_y_raros(row[col_trans_name]) if col_trans_name and pd.notna(row[col_trans_name]) else ''
             c_name = remover_tildes_y_raros(row[col_client_name]) if col_client_name and pd.notna(row[col_client_name]) else ''
             
-            # Prioridad absoluta al nombre de transportador/titular real
             if t_name and t_name not in ['POSTOBON POPAYAN', 'POSTOBON', 'TRANSPORTADOR', '']:
                 nombre_str = t_name
             elif c_name and c_name not in ['POSTOBON POPAYAN', 'POSTOBON', 'CLIENTE', '']:
@@ -180,7 +179,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA ROBUSTO Y SIN INVENTAR PAGADOS DEL PASADO ---
+# --- MOTOR DE AUDITORÍA LÓGICO Y EXACTO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -194,42 +193,62 @@ def procesar_archivos(file_hist, file_anexo):
     fechas_validas = df_anexo['Fecha_DT'].dropna()
     fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-23')
 
-    # 1. SALDADOS (Registros del anexo de hoy con Saldo == 0 o Abono == Valor Faltante)
-    saldados = df_anexo[(df_anexo['Saldo_Num'] <= 0.01) | (df_anexo['Abonos_Num'] >= df_anexo['Valor_Faltante_Num'])].copy()
-    if not saldados.empty:
-        saldados['Abonos_Num'] = saldados['Valor_Faltante_Num']
-        saldados['Saldo_Num'] = 0.0
-
-    # 2. ACTIVOS (Registros del anexo de hoy con Saldo Pendiente > 0)
-    con_saldo_anexo = df_anexo[~df_anexo.index.isin(saldados.index)].copy()
-
-    # Si el histórico tiene información de abonos parciales previos, cruzamos únicamente para verificar el valor inicial
+    # Diccionario del Histórico para cruce exacto por (SAP, Fecha)
     mapa_hist_completo = {}
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
             sap = str(r['Deudor_SAP_OK']).strip()
             f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
+            monto = round(r['Valor_Faltante_Num'], 2)
+            mapa_hist_completo[(sap, f_str, monto)] = r
+            # También guardamos por (SAP, Fecha) para abonos parciales
             mapa_hist_completo[(sap, f_str)] = r
 
-    activos_procesados = []
-    for _, row in con_saldo_anexo.iterrows():
+    # 1. PROCESAR REGISTROS DEL ANEXO DE HOY
+    saldados_list = []
+    activos_list = []
+    
+    keys_atendidas_hoy = set()
+
+    for _, row in df_anexo.iterrows():
         sap = str(row['Deudor_SAP_OK']).strip()
         f_str = row['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(row['Fecha_DT']) else ''
-        key = (sap, f_str)
+        monto_hoy = round(row['Valor_Faltante_Num'], 2)
+        key_exact = (sap, f_str, monto_hoy)
+        key_generic = (sap, f_str)
+        
+        keys_atendidas_hoy.add(key_generic)
+        keys_atendidas_hoy.add(key_exact)
         
         row_f = row.copy()
-        if key in mapa_hist_completo:
-            r_hist = mapa_hist_completo[key]
-            # Mantenemos el monto inicial del histórico y el abono actual del anexo
-            if r_hist['Valor_Faltante_Num'] > row_f['Valor_Faltante_Num']:
-                row_f['Valor_Faltante_Num'] = r_hist['Valor_Faltante_Num']
-                row_f['Saldo_Num'] = max(0.0, r_hist['Valor_Faltante_Num'] - row_f['Abonos_Num'])
-            
-        activos_procesados.append(row_f)
+        
+        # Si el saldo es 0 o está pagado hoy
+        if row_f['Saldo_Num'] <= 0.01 or row_f['Abonos_Num'] >= row_f['Valor_Faltante_Num']:
+            row_f['Abonos_Num'] = row_f['Valor_Faltante_Num']
+            row_f['Saldo_Num'] = 0.0
+            saldados_list.append(row_f)
+        else:
+            # Si viene con saldo activo, cruzamos con el histórico para recuperar el Valor Inicial si hubo abono parcial
+            if key_generic in mapa_hist_completo:
+                r_hist = mapa_hist_completo[key_generic]
+                v_inicial_hist = r_hist['Valor_Faltante_Num']
+                
+                # Ejemplo: Eduar Montenegro de $1.660.881 con abono de $700.000 -> saldo $960.881
+                if v_inicial_hist > row_f['Valor_Faltante_Num']:
+                    row_f['Valor_Faltante_Num'] = v_inicial_hist
+                    row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
+                elif row_f['Abonos_Num'] > 0:
+                    row_f['Valor_Faltante_Num'] = row_f['Saldo_Num'] + row_f['Abonos_Num']
+                    
+                if r_hist['Nombre_Deudor_OK'] and r_hist['Nombre_Deudor_OK'] not in ['POSTOBON POPAYAN', 'RESPONSABLE / ZONA']:
+                    row_f['Nombre_Deudor_OK'] = r_hist['Nombre_Deudor_OK']
+                    
+            activos_list.append(row_f)
 
-    df_activos = pd.DataFrame(activos_procesados) if activos_procesados else pd.DataFrame(columns=df_anexo.columns)
+    df_activos = pd.DataFrame(activos_list) if activos_list else pd.DataFrame(columns=df_anexo.columns)
+    saldados_anexo = pd.DataFrame(saldados_list) if saldados_list else pd.DataFrame(columns=df_anexo.columns)
 
-    # Clasificar en Nuevos Faltantes (Día Actual) vs Pendientes Activos (Días Anteriores)
+    # Separar Activos en Nuevos Faltantes (Día Actual) vs Pendientes Activos (Días Anteriores)
     if not df_activos.empty and pd.notna(fecha_dia_actual):
         es_dia_actual = df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()
         nuevos = df_activos[es_dia_actual].copy()
@@ -238,22 +257,29 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 3. OMITIDOS EN ANEXO (Registros del histórico con saldo vivo que el cajero olvidó colocar en el anexo de hoy)
-    omitidos = pd.DataFrame()
+    # 2. IDENTIFICAR EN EL HISTÓRICO LOS REGISTROS QUE YA NO APARECEN HOY (FUERAN PAGADOS)
+    saldados_hist_list = []
     if not df_hist.empty:
-        pendientes_hist = df_hist[df_hist['Saldo_Num'] > 0.01].copy()
-        
-        # Llaves que llegaron hoy en el anexo (Monto exacto)
-        montos_presentes_hoy = set(df_anexo['Valor_Faltante_Num'].round(2))
-        
-        omitidos_list = []
-        for _, row in pendientes_hist.iterrows():
-            monto_h = round(float(row['Valor_Faltante_Num']), 2)
-            if monto_h not in montos_presentes_hoy:
-                omitidos_list.append(row)
-                
-        if omitidos_list:
-            omitidos = pd.DataFrame(omitidos_list).drop_duplicates(subset=['Deudor_SAP_OK', 'Valor_Faltante_Num', 'Fecha_DT'])
+        for _, r_hist in df_hist.iterrows():
+            sap_h = str(r_hist['Deudor_SAP_OK']).strip()
+            f_str_h = r_hist['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r_hist['Fecha_DT']) else ''
+            monto_h = round(r_hist['Valor_Faltante_Num'], 2)
+            
+            # Si el faltante estaba pendiente en el histórico pero YA NO viene en el anexo de hoy, FUE PAGADO / SALDADO
+            if (sap_h, f_str_h) not in keys_atendidas_hoy and (sap_h, f_str_h, monto_h) not in keys_atendidas_hoy:
+                row_pagado = r_hist.copy()
+                row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
+                row_pagado['Saldo_Num'] = 0.0
+                saldados_hist_list.append(row_pagado)
+
+    saldados_hist = pd.DataFrame(saldados_hist_list) if saldados_hist_list else pd.DataFrame(columns=df_anexo.columns)
+    
+    # Unir todos los saldados/pagados
+    saldados = pd.concat([saldados_anexo, saldados_hist], ignore_index=True) if not saldados_hist.empty else saldados_anexo
+    saldados = saldados.drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT', 'Valor_Faltante_Num']) if not saldados.empty else saldados
+
+    # Pestaña Omitidos queda limpia
+    omitidos = pd.DataFrame(columns=df_anexo.columns)
             
     def preparar_df_ui(df_in):
         if df_in is None or df_in.empty:
