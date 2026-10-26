@@ -52,7 +52,7 @@ def formatear_fecha_ui(val_dt):
     if pd.isna(val_dt): return 'Sin Fecha'
     return val_dt.strftime('%d/%m/%Y')
 
-# ESCANEO INTELIGENTE PARA EXTRAER NOMBRES REALES EN TEXTO
+# PALABRAS A IGNORAR AL BUSCAR NOMBRES REALES
 PALABRAS_PROHIBIDAS = [
     'POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'TESORERIA', 'CARTERA', 
     'VENTAS', 'LOGISTICA', 'SI', 'NO', 'NONE', 'NAN', 'RESPONSABLE / ZONA',
@@ -60,28 +60,23 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
-    # 1. Probar en la columna de titular/responsable
     if col_titular and col_titular in row.index and pd.notna(row[col_titular]):
         txt = remover_tildes_y_raros(row[col_titular])
         if txt and not txt.isdigit() and len(txt) > 2 and txt not in PALABRAS_PROHIBIDAS:
             return txt
 
-    # 2. Probar en la columna de cliente / observación
     if col_cliente and col_cliente in row.index and pd.notna(row[col_cliente]):
         txt = remover_tildes_y_raros(row[col_cliente])
         if txt and not txt.isdigit() and len(txt) > 2 and txt not in PALABRAS_PROHIBIDAS:
-            # Si dice "CLIENTE 100259...", extraer la parte del nombre
             txt_clean = re.sub(r'^CLIENTE\s+\d+\s*', '', txt).strip()
             if txt_clean and not txt_clean.isdigit() and len(txt_clean) > 2:
                 return txt_clean
             elif txt and not txt.isdigit():
                 return txt
 
-    # 3. Escaneo exhaustivo celda por celda en la fila buscando el primer texto con letras reales
     for val in row.values:
         if pd.notna(val):
             txt = remover_tildes_y_raros(val)
-            # Debe tener letras, no ser puramente números, ni fechas, ni montos
             if txt and not txt.isdigit() and not re.match(r'^\d{2}/\d{2}/\d{4}$', txt) and len(txt) > 3:
                 if txt not in PALABRAS_PROHIBIDAS and not txt.startswith('31000'):
                     if 'PAGO' not in txt and 'FACTURA' not in txt and 'DIFERENCIA' not in txt:
@@ -123,7 +118,7 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c or 'DUEDOR' in c or 'DEUDOR' in c), None)
+        col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c or 'CLE' in c), None)
         if not col_sap:
             col_sap = next((c for c in df.columns if 'CODIGO' in c or 'SAP' in c), None)
             
@@ -219,7 +214,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA ---
+# --- MOTOR DE AUDITORÍA UNIFICADO Y CORREGIDO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -233,51 +228,65 @@ def procesar_archivos(file_hist, file_anexo):
     fechas_validas = df_anexo['Fecha_DT'].dropna()
     fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-23')
 
-    # Diccionario del Histórico
-    mapa_hist_completo = {}
+    # Mapeo del histórico indexado por (SAP + Fecha) y por (Nombre + Fecha)
+    mapa_hist_sap_fecha = {}
+    mapa_hist_nom_fecha = {}
+    
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
             sap = str(r['Deudor_SAP_OK']).strip()
+            nom = str(r['Nombre_Deudor_OK']).strip().upper()
             f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
-            monto = round(r['Valor_Faltante_Num'], 2)
-            mapa_hist_completo[(sap, f_str, monto)] = r
-            mapa_hist_completo[(sap, f_str)] = r
+            
+            if sap and sap != '1':
+                mapa_hist_sap_fecha[(sap, f_str)] = r
+            if nom and nom not in PALABRAS_PROHIBIDAS:
+                mapa_hist_nom_fecha[(nom, f_str)] = r
 
     # 1. PROCESAR REGISTROS DEL ANEXO DE HOY
     saldados_list = []
     activos_list = []
-    keys_atendidas_hoy = set()
+    
+    # Llaves procesadas hoy para evitar duplicar en el histórico
+    keys_sap_fecha_atendidas = set()
+    keys_nom_fecha_atendidas = set()
 
     for _, row in df_anexo.iterrows():
         sap = str(row['Deudor_SAP_OK']).strip()
+        nom = str(row['Nombre_Deudor_OK']).strip().upper()
         f_str = row['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(row['Fecha_DT']) else ''
-        monto_hoy = round(row['Valor_Faltante_Num'], 2)
-        key_exact = (sap, f_str, monto_hoy)
-        key_generic = (sap, f_str)
         
-        keys_atendidas_hoy.add(key_generic)
-        keys_atendidas_hoy.add(key_exact)
+        if sap and sap != '1': keys_sap_fecha_atendidas.add((sap, f_str))
+        if nom and nom not in PALABRAS_PROHIBIDAS: keys_nom_fecha_atendidas.add((nom, f_str))
         
         row_f = row.copy()
         
-        if row_f['Saldo_Num'] <= 0.01 or row_f['Abonos_Num'] >= row_f['Valor_Faltante_Num']:
+        # Buscar en histórico para recuperar el Valor Faltante Inicial y Abonos parciales acumulados
+        r_hist = None
+        if (sap, f_str) in mapa_hist_sap_fecha:
+            r_hist = mapa_hist_sap_fecha[(sap, f_str)]
+        elif (nom, f_str) in mapa_hist_nom_fecha:
+            r_hist = mapa_hist_nom_fecha[(nom, f_str)]
+
+        if r_hist is not None:
+            v_inicial_hist = r_hist['Valor_Faltante_Num']
+            # Si en el histórico el faltante era mayor que el saldo actual del anexo, recuperamos los abonos
+            if v_inicial_hist > row_f['Saldo_Num']:
+                row_f['Valor_Faltante_Num'] = v_inicial_hist
+                row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
+            elif row_f['Abonos_Num'] > 0:
+                row_f['Valor_Faltante_Num'] = row_f['Saldo_Num'] + row_f['Abonos_Num']
+                
+            if r_hist['Nombre_Deudor_OK'] and not r_hist['Nombre_Deudor_OK'].isdigit() and r_hist['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
+                row_f['Nombre_Deudor_OK'] = r_hist['Nombre_Deudor_OK']
+            if sap == '1' and r_hist['Deudor_SAP_OK'] and r_hist['Deudor_SAP_OK'] != '1':
+                row_f['Deudor_SAP_OK'] = r_hist['Deudor_SAP_OK']
+
+        if row_f['Saldo_Num'] <= 0.01:
             row_f['Abonos_Num'] = row_f['Valor_Faltante_Num']
             row_f['Saldo_Num'] = 0.0
             saldados_list.append(row_f)
         else:
-            if key_generic in mapa_hist_completo:
-                r_hist = mapa_hist_completo[key_generic]
-                v_inicial_hist = r_hist['Valor_Faltante_Num']
-                
-                if v_inicial_hist > row_f['Valor_Faltante_Num']:
-                    row_f['Valor_Faltante_Num'] = v_inicial_hist
-                    row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
-                elif row_f['Abonos_Num'] > 0:
-                    row_f['Valor_Faltante_Num'] = row_f['Saldo_Num'] + row_f['Abonos_Num']
-                    
-                if r_hist['Nombre_Deudor_OK'] and not r_hist['Nombre_Deudor_OK'].isdigit() and r_hist['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
-                    row_f['Nombre_Deudor_OK'] = r_hist['Nombre_Deudor_OK']
-                    
             activos_list.append(row_f)
 
     df_activos = pd.DataFrame(activos_list) if activos_list else pd.DataFrame(columns=df_anexo.columns)
@@ -291,15 +300,19 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 2. IDENTIFICAR EN EL HISTÓRICO LOS REGISTROS QUE YA NO APARECEN HOY (SALDADOS / PAGADOS)
+    # 2. REGISTROS DEL HISTÓRICO QUE YA NO APARECEN HOY (FUERON TOTALMENTE PAGADOS)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
             sap_h = str(r_hist['Deudor_SAP_OK']).strip()
+            nom_h = str(r_hist['Nombre_Deudor_OK']).strip().upper()
             f_str_h = r_hist['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r_hist['Fecha_DT']) else ''
-            monto_h = round(r_hist['Valor_Faltante_Num'], 2)
             
-            if (sap_h, f_str_h) not in keys_atendidas_hoy and (sap_h, f_str_h, monto_h) not in keys_atendidas_hoy:
+            # Solo si NO fue procesado hoy en el anexo (para evitar duplicaciones)
+            esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h) in keys_sap_fecha_atendidas) or \
+                            (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h) in keys_nom_fecha_atendidas)
+            
+            if not esta_en_anexo:
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
                 row_pagado['Saldo_Num'] = 0.0
