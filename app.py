@@ -148,7 +148,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ---
+# --- CARGAR ANEXO EXCEL (SOLO CON IMPORTE) ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -178,32 +178,23 @@ def cargar_anexo_excel(file_obj):
         col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
         col_fecha = next((c for c in df.columns if 'FECHA' in c), None)
         col_valor = next((c for c in df.columns if 'IMPORTE' in c or 'VALOR' in c), None)
-        col_abono = next((c for c in df.columns if 'ABONO' in c), None)
-        col_saldo = next((c for c in df.columns if 'SALDO' in c), None)
         col_motivo = next((c for c in df.columns if 'MOTIVO' in c), None)
         
-        df['Valor_Faltante_Num'] = df[col_valor].apply(limpiar_monto) if col_valor else 0.0
-        df['Abonos_Num'] = df[col_abono].apply(limpiar_monto) if col_abono else 0.0
-        
-        saldo_calc = df['Valor_Faltante_Num'] - df['Abonos_Num']
-        if col_saldo:
-            s_val = df[col_saldo].apply(limpiar_monto)
-            df['Saldo_Num'] = s_val.where(s_val > 0, saldo_calc)
-        else:
-            df['Saldo_Num'] = saldo_calc
-        
-        nombres_finales, saps_finales, mot_finales = [], [], []
+        nombres_finales, saps_finales, mot_finales, importes_finales = [], [], [], []
         for _, row in df.iterrows():
             nombre_ok = extraer_nombre_real_fila(row, col_titular, col_cliente)
             c_code = normalizar_sap(row[col_sap]) if col_sap and pd.notna(row[col_sap]) else '1'
             motivo = str(row[col_motivo]).strip() if col_motivo and pd.notna(row[col_motivo]) else ''
+            val_imp = limpiar_monto(row[col_valor]) if col_valor else 0.0
             
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
             mot_finales.append(motivo)
+            importes_finales.append(val_imp)
             
         df['Nombre_Deudor_OK'] = nombres_finales
         df['Deudor_SAP_OK'] = saps_finales
+        df['Valor_Faltante_Num'] = importes_finales
         df['Fecha_DT'] = df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
         df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
         df['Motivo_OK'] = mot_finales
@@ -213,7 +204,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CON CRUCE PRECISO ---
+# --- MOTOR DE AUDITORÍA CON CRUCE MAESTRO INTELIGENTE ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -230,9 +221,9 @@ def procesar_archivos(file_hist, file_anexo):
     mes_actual = fecha_dia_actual.month
     ano_actual = fecha_dia_actual.year
 
-    # Indexar histórico maestro por (SAP, Fecha, Monto) y (Nombre, Fecha, Monto)
-    mapa_hist_exacto = {}
-    mapa_hist_generico = {}
+    # Crear diccionarios de búsqueda rápida basados en el Histórico Maestro
+    mapa_hist_exacto = {} # (SAP o Nombre, Fecha, Monto) -> Registro completo
+    mapa_hist_generico = {} # (SAP o Nombre, Fecha) -> Registro completo
     
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
@@ -242,15 +233,15 @@ def procesar_archivos(file_hist, file_anexo):
             f_str = f_dt.strftime('%Y-%m-%d') if pd.notna(f_dt) else ''
             monto = round(r['Valor_Faltante_Num'], 2)
             
-            mapa_hist_exacto[(sap, f_str, monto)] = r
-            mapa_hist_exacto[(nom, f_str, monto)] = r
-            mapa_hist_generico[(sap, f_str)] = r
-            mapa_hist_generico[(nom, f_str)] = r
+            if sap and sap != '1':
+                mapa_hist_exacto[(sap, f_str, monto)] = r
+                mapa_hist_generico[(sap, f_str)] = r
+            if nom and nom not in PALABRAS_PROHIBIDAS:
+                mapa_hist_exacto[(nom, f_str, monto)] = r
+                mapa_hist_generico[(nom, f_str)] = r
 
-    # 1. EVALUAR REGISTROS DEL ANEXO DE HOY
     saldados_list = []
     activos_list = []
-    
     keys_atendidas_anexo = set()
 
     for _, row in df_anexo.iterrows():
@@ -260,37 +251,42 @@ def procesar_archivos(file_hist, file_anexo):
         f_str = f_dt.strftime('%Y-%m-%d') if pd.notna(f_dt) else ''
         monto_anexo = round(row['Valor_Faltante_Num'], 2)
         
-        keys_atendidas_anexo.add((sap, f_str))
-        keys_atendidas_anexo.add((nom, f_str))
+        if sap and sap != '1': keys_atendidas_anexo.add((sap, f_str))
+        if nom and nom not in PALABRAS_PROHIBIDAS: keys_atendidas_anexo.add((nom, f_str))
         
         row_f = row.copy()
         
-        # Verificar si en el histórico maestro este monto exacto YA ESTÁ SALDADO / CANCELADO (Ej. $515.000)
+        # 1. VERIFICAR SI EN EL HISTÓRICO ESTE MONTO EXACTO YA ESTABA SALDADO (Ej. El caso del $515.000)
         r_hist_exacto = mapa_hist_exacto.get((sap, f_str, monto_anexo)) or mapa_hist_exacto.get((nom, f_str, monto_anexo))
         
         if r_hist_exacto is not None and (r_hist_exacto['Saldo_Num'] <= 0.01 or r_hist_exacto['Abonos_Num'] >= r_hist_exacto['Valor_Faltante_Num']):
-            # CASO ESPECIAL DEL $515.000: En el histórico ya está saldado con Saldo 0
             row_f['Valor_Faltante_Num'] = r_hist_exacto['Valor_Faltante_Num']
             row_f['Abonos_Num'] = r_hist_exacto['Valor_Faltante_Num']
             row_f['Saldo_Num'] = 0.0
+            if r_hist_exacto['Deudor_SAP_OK'] != '1':
+                row_f['Deudor_SAP_OK'] = r_hist_exacto['Deudor_SAP_OK']
             if r_hist_exacto['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
                 row_f['Nombre_Deudor_OK'] = r_hist_exacto['Nombre_Deudor_OK']
             saldados_list.append(row_f)
             continue
-            
-        # Si no es un saldado previo, recuperar el valor inicial si hubo abono parcial
+
+        # 2. VERIFICAR SI TUVO ABONOS PARCIALES ANTERIORES
         r_hist_gen = mapa_hist_generico.get((sap, f_str)) or mapa_hist_generico.get((nom, f_str))
         if r_hist_gen is not None:
             v_inicial_hist = r_hist_gen['Valor_Faltante_Num']
-            if v_inicial_hist > row_f['Saldo_Num']:
-                row_f['Valor_Faltante_Num'] = v_inicial_hist
-                row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
-            elif row_f['Abonos_Num'] > 0:
-                row_f['Valor_Faltante_Num'] = row_f['Saldo_Num'] + row_f['Abonos_Num']
-                
-            if r_hist_gen['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS and not r_hist_gen['Nombre_Deudor_OK'].isdigit():
+            saldo_hist = r_hist_gen['Saldo_Num']
+            abonos_hist = r_hist_gen['Abonos_Num']
+            
+            row_f['Valor_Faltante_Num'] = v_inicial_hist
+            row_f['Abonos_Num'] = abonos_hist
+            row_f['Saldo_Num'] = saldo_hist
+            
+            if r_hist_gen['Deudor_SAP_OK'] != '1':
+                row_f['Deudor_SAP_OK'] = r_hist_gen['Deudor_SAP_OK']
+            if r_hist_gen['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
                 row_f['Nombre_Deudor_OK'] = r_hist_gen['Nombre_Deudor_OK']
 
+        # Clasificar según su saldo real actual
         if row_f['Saldo_Num'] <= 0.01:
             row_f['Abonos_Num'] = row_f['Valor_Faltante_Num']
             row_f['Saldo_Num'] = 0.0
@@ -309,7 +305,7 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 2. IDENTIFICAR DEUDAS ACTIVAS DEL MES ACTUAL QUE DESAPARECIERON DEL ANEXO (PAGADAS HOY)
+    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY DEL ANEXO (PAGADOS TOTALMENTE)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -319,11 +315,9 @@ def procesar_archivos(file_hist, file_anexo):
             f_str_h = f_dt_h.strftime('%Y-%m-%d') if pd.notna(f_dt_h) else ''
             
             es_mes_actual = pd.notna(f_dt_h) and f_dt_h.month == mes_actual and f_dt_h.year == ano_actual
-            
             esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h) in keys_atendidas_anexo) or \
                             (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h) in keys_atendidas_anexo)
             
-            # Solo si era una deuda ACTIVA (> 0) del mes actual que HOY ya no viene reportada
             if es_mes_actual and not esta_en_anexo and r_hist['Saldo_Num'] > 0:
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
@@ -333,7 +327,6 @@ def procesar_archivos(file_hist, file_anexo):
     saldados_hist = pd.DataFrame(saldados_hist_list) if saldados_hist_list else pd.DataFrame(columns=df_anexo.columns)
     
     saldados = pd.concat([saldados_anexo, saldados_hist], ignore_index=True) if not saldados_hist.empty else saldados_anexo
-    
     if not saldados.empty:
         saldados = saldados.drop_duplicates(subset=['Nombre_Deudor_OK', 'Fecha_DT', 'Valor_Faltante_Num'])
 
