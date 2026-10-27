@@ -223,7 +223,6 @@ def procesar_archivos(file_hist, file_anexo):
     mes_actual = fecha_dia_actual.month
     ano_actual = fecha_dia_actual.year
 
-    # Indexar histórico maestro por llave única exacta (SAP o Nombre + Fecha + Monto)
     mapa_hist_exacto = {}
     mapa_hist_generico = {}
     
@@ -258,7 +257,6 @@ def procesar_archivos(file_hist, file_anexo):
         
         row_f = row.copy()
         
-        # Consultar si en el histórico maestro este registro exacto tenía abonos previos o saldo
         r_hist_gen = mapa_hist_generico.get((sap, f_str)) or mapa_hist_generico.get((nom, f_str))
         if r_hist_gen is not None:
             v_inicial_hist = r_hist_gen['Valor_Faltante_Num']
@@ -287,12 +285,12 @@ def procesar_archivos(file_hist, file_anexo):
     if not df_activos.empty and pd.notna(fecha_dia_actual):
         es_dia_actual = df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()
         nuevos = df_activos[es_dia_actual].copy()
-        pendientes = df_activos[~df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()].copy()
+        pendientes = df_activos[df_activos['Fecha_DT'].dt.date != fecha_dia_actual.date()].copy()
     else:
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 🟢 CAPTURAR AUTOMÁTICAMENTE LOS SALDADOS HISTÓRICOS DEL MES QUE YA NO ESTÁN EN EL ANEXO DE HOY (Ej. El $515.000 de Franklin Calvache)
+    # Capturar automáticamente los saldados históricos del mes que ya no están en el anexo de hoy
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -304,12 +302,10 @@ def procesar_archivos(file_hist, file_anexo):
             
             es_mes_actual = pd.notna(f_dt_h) and f_dt_h.month == mes_actual and f_dt_h.year == ano_actual
             
-            # Si este registro exacto (SAP/Nombre + Fecha + Monto) NO viene en el anexo de hoy Y estaba en el histórico
             esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h, monto_h) in keys_atendidas_anexo) or \
                             (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h, monto_h) in keys_atendidas_anexo)
             
             if es_mes_actual and not esta_en_anexo:
-                # Si en el histórico ya estaba en saldo 0 o si desapareció del anexo porque fue pagado
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
                 row_pagado['Saldo_Num'] = 0.0
