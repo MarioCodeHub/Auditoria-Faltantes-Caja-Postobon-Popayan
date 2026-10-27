@@ -52,7 +52,6 @@ def formatear_fecha_ui(val_dt):
     if pd.isna(val_dt): return 'Sin Fecha'
     return val_dt.strftime('%d/%m/%Y')
 
-# PALABRAS A IGNORAR AL BUSCAR NOMBRES REALES
 PALABRAS_PROHIBIDAS = [
     'POSTOBON POPAYAN', 'POSTOBON', 'POPAYAN', 'TESORERIA', 'CARTERA', 
     'VENTAS', 'LOGISTICA', 'SI', 'NO', 'NONE', 'NAN', 'RESPONSABLE / ZONA',
@@ -85,7 +84,7 @@ def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
     return 'RESPONSABLE / ZONA'
 
 
-# --- CARGAR HISTÓRICO CSV ---
+# --- CARGAR HISTÓRICO CSV SIN PERDER REGISTROS CON SALDO 0 ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -118,9 +117,10 @@ def cargar_historico_csv(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep='first')].copy()
         
-        col_sap = next((c for c in df.columns if 'DUEDOR' in c or 'DEUDOR' in c or 'CLE' in c), None)
+        # Búsqueda de SAP ignorando 'CODIGO CLE'
+        col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c or 'DUEDOR' in c or 'DEUDOR' in c), None)
         if not col_sap:
-            col_sap = next((c for c in df.columns if 'CODIGO' in c or 'SAP' in c), None)
+            col_sap = next((c for c in df.columns if 'SAP' in c and 'CLE' not in c and 'SI' not in c), None)
             
         col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c or 'TRANSPORTADOR' in c), None)
         col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
@@ -144,7 +144,8 @@ def cargar_historico_csv(file_obj):
         df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
         df['Motivo_OK'] = df[col_motivo].astype(str).str.strip() if col_motivo and col_motivo in df.columns else ''
         
-        return df[(df['Saldo_Num'] > 0) & (df['Deudor_SAP_OK'] != '') & (df['Fecha_DT'].notna()) & (df['Fecha_DT'].dt.year >= 2026)].copy()
+        # OJO: NO filtramos por Saldo_Num > 0 para no perder saldados como el de $515.000
+        return df[(df['Valor_Faltante_Num'] > 0) & (df['Fecha_DT'].notna()) & (df['Fecha_DT'].dt.year >= 2026)].copy()
     except Exception as e:
         return pd.DataFrame()
 
@@ -173,7 +174,7 @@ def cargar_anexo_excel(file_obj):
         
         col_sap = next((c for c in df.columns if 'DUEDOR SAP' in c or 'DEUDOR SAP' in c or 'DUEDOR' in c or 'DEUDOR' in c), None)
         if not col_sap:
-            col_sap = next((c for c in df.columns if 'CODIGO' in c or 'SAP' in c), None)
+            col_sap = next((c for c in df.columns if 'SAP' in c and 'CLE' not in c and 'SI' not in c), None)
             
         col_titular = next((c for c in df.columns if 'TITULAR' in c or 'RESPONSABLE' in c or 'ZONA' in c or 'TRANSPORTADOR' in c), None)
         col_cliente = next((c for c in df.columns if 'OBSERVAC' in c or 'CLIENTE' in c), None)
@@ -214,7 +215,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA UNIFICADO Y CORREGIDO ---
+# --- MOTOR DE AUDITORÍA PERFECTO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -228,9 +229,10 @@ def procesar_archivos(file_hist, file_anexo):
     fechas_validas = df_anexo['Fecha_DT'].dropna()
     fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-23')
 
-    # Mapeo del histórico indexado por (SAP + Fecha) y por (Nombre + Fecha)
+    # Diccionario del histórico
     mapa_hist_sap_fecha = {}
     mapa_hist_nom_fecha = {}
+    saldados_directos_hist = []
     
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
@@ -238,16 +240,22 @@ def procesar_archivos(file_hist, file_anexo):
             nom = str(r['Nombre_Deudor_OK']).strip().upper()
             f_str = r['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r['Fecha_DT']) else ''
             
+            # Si en el histórico ya venía marcado con saldo 0 o abono total, guardar directo para Saldados/Pagados
+            if r['Saldo_Num'] <= 0.01 or r['Abonos_Num'] >= r['Valor_Faltante_Num']:
+                r_pag = r.copy()
+                r_pag['Abonos_Num'] = r_pag['Valor_Faltante_Num']
+                r_pag['Saldo_Num'] = 0.0
+                saldados_directos_hist.append(r_pag)
+
             if sap and sap != '1':
                 mapa_hist_sap_fecha[(sap, f_str)] = r
             if nom and nom not in PALABRAS_PROHIBIDAS:
                 mapa_hist_nom_fecha[(nom, f_str)] = r
 
     # 1. PROCESAR REGISTROS DEL ANEXO DE HOY
-    saldados_list = []
+    saldados_list = list(saldados_directos_hist)
     activos_list = []
     
-    # Llaves procesadas hoy para evitar duplicar en el histórico
     keys_sap_fecha_atendidas = set()
     keys_nom_fecha_atendidas = set()
 
@@ -261,7 +269,6 @@ def procesar_archivos(file_hist, file_anexo):
         
         row_f = row.copy()
         
-        # Buscar en histórico para recuperar el Valor Faltante Inicial y Abonos parciales acumulados
         r_hist = None
         if (sap, f_str) in mapa_hist_sap_fecha:
             r_hist = mapa_hist_sap_fecha[(sap, f_str)]
@@ -270,7 +277,6 @@ def procesar_archivos(file_hist, file_anexo):
 
         if r_hist is not None:
             v_inicial_hist = r_hist['Valor_Faltante_Num']
-            # Si en el histórico el faltante era mayor que el saldo actual del anexo, recuperamos los abonos
             if v_inicial_hist > row_f['Saldo_Num']:
                 row_f['Valor_Faltante_Num'] = v_inicial_hist
                 row_f['Abonos_Num'] = v_inicial_hist - row_f['Saldo_Num']
@@ -300,7 +306,7 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 2. REGISTROS DEL HISTÓRICO QUE YA NO APARECEN HOY (FUERON TOTALMENTE PAGADOS)
+    # 2. PROCESAR FALTANTES VIEJOS QUE DESAPARECIERON HOY
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -308,11 +314,10 @@ def procesar_archivos(file_hist, file_anexo):
             nom_h = str(r_hist['Nombre_Deudor_OK']).strip().upper()
             f_str_h = r_hist['Fecha_DT'].strftime('%Y-%m-%d') if pd.notna(r_hist['Fecha_DT']) else ''
             
-            # Solo si NO fue procesado hoy en el anexo (para evitar duplicaciones)
             esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h) in keys_sap_fecha_atendidas) or \
                             (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h) in keys_nom_fecha_atendidas)
             
-            if not esta_en_anexo:
+            if not esta_en_anexo and r_hist['Saldo_Num'] > 0:
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
                 row_pagado['Saldo_Num'] = 0.0
@@ -321,7 +326,11 @@ def procesar_archivos(file_hist, file_anexo):
     saldados_hist = pd.DataFrame(saldados_hist_list) if saldados_hist_list else pd.DataFrame(columns=df_anexo.columns)
     
     saldados = pd.concat([saldados_anexo, saldados_hist], ignore_index=True) if not saldados_hist.empty else saldados_anexo
-    saldados = saldados.drop_duplicates(subset=['Deudor_SAP_OK', 'Fecha_DT', 'Valor_Faltante_Num']) if not saldados.empty else saldados
+    
+    # Deduplicar saldados manteniendo el mejor registro con nombre y SAP real
+    if not saldados.empty:
+        saldados = saldados.sort_values(by=['Deudor_SAP_OK', 'Valor_Faltante_Num'], ascending=False)
+        saldados = saldados.drop_duplicates(subset=['Nombre_Deudor_OK', 'Fecha_DT', 'Valor_Faltante_Num'])
 
     omitidos = pd.DataFrame(columns=df_anexo.columns)
             
