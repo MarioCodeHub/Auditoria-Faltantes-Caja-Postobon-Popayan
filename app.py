@@ -195,6 +195,8 @@ def cargar_anexo_excel(file_obj):
         df['Nombre_Deudor_OK'] = nombres_finales
         df['Deudor_SAP_OK'] = saps_finales
         df['Valor_Faltante_Num'] = importes_finales
+        df['Abonos_Num'] = 0.0
+        df['Saldo_Num'] = importes_finales
         df['Fecha_DT'] = df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
         df['Fecha_UI'] = df['Fecha_DT'].apply(formatear_fecha_ui)
         df['Motivo_OK'] = mot_finales
@@ -255,7 +257,7 @@ def procesar_archivos(file_hist, file_anexo):
         
         row_f = row.copy()
         
-        # 1. CASO $515.000: Verificar si el histórico maestro ya lo tiene con Saldo = 0
+        # 1. CASO $515.000: Verificar si en el histórico maestro ya figuraba saldado (Saldo = 0)
         r_hist_exacto = mapa_hist_exacto.get((sap, f_str, monto_anexo)) or mapa_hist_exacto.get((nom, f_str, monto_anexo))
         
         if r_hist_exacto is not None and (r_hist_exacto['Saldo_Num'] <= 0.01 or r_hist_exacto['Abonos_Num'] >= r_hist_exacto['Valor_Faltante_Num']):
@@ -303,7 +305,7 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY (CANCELADOS)
+    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY (CANCELADOS EN EL ANEXO DE HOY)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
