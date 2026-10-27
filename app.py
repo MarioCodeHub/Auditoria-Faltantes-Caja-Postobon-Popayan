@@ -206,7 +206,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CON CRUCE MAESTRO INTELIGENTE ---
+# --- MOTOR DE AUDITORÍA PERFECTO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -223,6 +223,7 @@ def procesar_archivos(file_hist, file_anexo):
     mes_actual = fecha_dia_actual.month
     ano_actual = fecha_dia_actual.year
 
+    # Indexar histórico maestro por llave única exacta (SAP o Nombre + Fecha + Monto)
     mapa_hist_exacto = {}
     mapa_hist_generico = {}
     
@@ -252,26 +253,12 @@ def procesar_archivos(file_hist, file_anexo):
         f_str = f_dt.strftime('%Y-%m-%d') if pd.notna(f_dt) else ''
         monto_anexo = round(row['Valor_Faltante_Num'], 2)
         
-        if sap and sap != '1': keys_atendidas_anexo.add((sap, f_str))
-        if nom and nom not in PALABRAS_PROHIBIDAS: keys_atendidas_anexo.add((nom, f_str))
+        if sap and sap != '1': keys_atendidas_anexo.add((sap, f_str, monto_anexo))
+        if nom and nom not in PALABRAS_PROHIBIDAS: keys_atendidas_anexo.add((nom, f_str, monto_anexo))
         
         row_f = row.copy()
         
-        # 1. CASO $515.000: Verificar si en el histórico maestro ya figuraba saldado (Saldo = 0)
-        r_hist_exacto = mapa_hist_exacto.get((sap, f_str, monto_anexo)) or mapa_hist_exacto.get((nom, f_str, monto_anexo))
-        
-        if r_hist_exacto is not None and (r_hist_exacto['Saldo_Num'] <= 0.01 or r_hist_exacto['Abonos_Num'] >= r_hist_exacto['Valor_Faltante_Num']):
-            row_f['Valor_Faltante_Num'] = r_hist_exacto['Valor_Faltante_Num']
-            row_f['Abonos_Num'] = r_hist_exacto['Valor_Faltante_Num']
-            row_f['Saldo_Num'] = 0.0
-            if r_hist_exacto['Deudor_SAP_OK'] != '1':
-                row_f['Deudor_SAP_OK'] = r_hist_exacto['Deudor_SAP_OK']
-            if r_hist_exacto['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
-                row_f['Nombre_Deudor_OK'] = r_hist_exacto['Nombre_Deudor_OK']
-            saldados_list.append(row_f)
-            continue
-
-        # 2. ABONOS PARCIALES ANTERIORES
+        # Consultar si en el histórico maestro este registro exacto tenía abonos previos o saldo
         r_hist_gen = mapa_hist_generico.get((sap, f_str)) or mapa_hist_generico.get((nom, f_str))
         if r_hist_gen is not None:
             v_inicial_hist = r_hist_gen['Valor_Faltante_Num']
@@ -300,12 +287,12 @@ def procesar_archivos(file_hist, file_anexo):
     if not df_activos.empty and pd.notna(fecha_dia_actual):
         es_dia_actual = df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()
         nuevos = df_activos[es_dia_actual].copy()
-        pendientes = df_activos[~es_dia_actual].copy()
+        pendientes = df_activos[~df_activos['Fecha_DT'].dt.date == fecha_dia_actual.date()].copy()
     else:
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY (CANCELADOS EN EL ANEXO DE HOY)
+    # 🟢 CAPTURAR AUTOMÁTICAMENTE LOS SALDADOS HISTÓRICOS DEL MES QUE YA NO ESTÁN EN EL ANEXO DE HOY (Ej. El $515.000 de Franklin Calvache)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -313,12 +300,16 @@ def procesar_archivos(file_hist, file_anexo):
             nom_h = str(r_hist['Nombre_Deudor_OK']).strip().upper()
             f_dt_h = r_hist['Fecha_DT']
             f_str_h = f_dt_h.strftime('%Y-%m-%d') if pd.notna(f_dt_h) else ''
+            monto_h = round(r_hist['Valor_Faltante_Num'], 2)
             
             es_mes_actual = pd.notna(f_dt_h) and f_dt_h.month == mes_actual and f_dt_h.year == ano_actual
-            esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h) in keys_atendidas_anexo) or \
-                            (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h) in keys_atendidas_anexo)
             
-            if es_mes_actual and not esta_en_anexo and r_hist['Saldo_Num'] > 0:
+            # Si este registro exacto (SAP/Nombre + Fecha + Monto) NO viene en el anexo de hoy Y estaba en el histórico
+            esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h, monto_h) in keys_atendidas_anexo) or \
+                            (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h, monto_h) in keys_atendidas_anexo)
+            
+            if es_mes_actual and not esta_en_anexo:
+                # Si en el histórico ya estaba en saldo 0 o si desapareció del anexo porque fue pagado
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
                 row_pagado['Saldo_Num'] = 0.0
@@ -426,19 +417,14 @@ if ejecutar:
         
         tab1, tab2, tab3, tab4 = st.tabs(["🔴 Nuevos Faltantes", "🟢 Faltantes Saldados / Pagados", "🟣 Pendientes Activos", "⚠️ Omitidos en Anexo"])
         
-        with tab1:
-            st.dataframe(df_nuevos, use_container_width=True)
-        with tab2:
-            if df_saldados.empty:
-                st.info("No se detectaron faltantes saldados/pagados en este corte.")
-            else:
-                st.dataframe(df_saldados, use_container_width=True)
-        with tab3:
-            st.dataframe(df_pendientes, use_container_width=True)
-        with tab4:
-            if df_omitidos.empty:
-                st.info("¡Excelente! No hay registros omitidos en este anexo.")
-            else:
-                st.dataframe(df_omitidos, use_container_width=True)
+        dataframes = [df_nuevos, df_saldados, df_pendientes, df_omitidos]
+        tabs = [tab1, tab2, tab3, tab4]
+        
+        for tab, df_item in zip(tabs, dataframes):
+            with tab:
+                if df_item.empty:
+                    st.info("No hay registros en esta categoría para este corte.")
+                else:
+                    st.dataframe(df_item, use_container_width=True)
 else:
     st.info("💡 Sube el **Histórico Maestro (.csv)** y el **Anexo del día**, luego presiona **EJECUTAR AUDITORÍA**.")
