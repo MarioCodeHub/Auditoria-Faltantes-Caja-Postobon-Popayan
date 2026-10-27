@@ -84,7 +84,7 @@ def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
     return 'RESPONSABLE / ZONA'
 
 
-# --- CARGAR HISTÓRICO CSV ---
+# --- CARGAR HISTÓRICO CSV MAESTRO ---
 def cargar_historico_csv(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -148,7 +148,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (SOLO CON IMPORTE) ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None: return pd.DataFrame()
     try:
@@ -221,9 +221,8 @@ def procesar_archivos(file_hist, file_anexo):
     mes_actual = fecha_dia_actual.month
     ano_actual = fecha_dia_actual.year
 
-    # Crear diccionarios de búsqueda rápida basados en el Histórico Maestro
-    mapa_hist_exacto = {} # (SAP o Nombre, Fecha, Monto) -> Registro completo
-    mapa_hist_generico = {} # (SAP o Nombre, Fecha) -> Registro completo
+    mapa_hist_exacto = {}
+    mapa_hist_generico = {}
     
     if not df_hist.empty:
         for _, r in df_hist.iterrows():
@@ -256,7 +255,7 @@ def procesar_archivos(file_hist, file_anexo):
         
         row_f = row.copy()
         
-        # 1. VERIFICAR SI EN EL HISTÓRICO ESTE MONTO EXACTO YA ESTABA SALDADO (Ej. El caso del $515.000)
+        # 1. CASO $515.000: Verificar si el histórico maestro ya lo tiene con Saldo = 0
         r_hist_exacto = mapa_hist_exacto.get((sap, f_str, monto_anexo)) or mapa_hist_exacto.get((nom, f_str, monto_anexo))
         
         if r_hist_exacto is not None and (r_hist_exacto['Saldo_Num'] <= 0.01 or r_hist_exacto['Abonos_Num'] >= r_hist_exacto['Valor_Faltante_Num']):
@@ -270,7 +269,7 @@ def procesar_archivos(file_hist, file_anexo):
             saldados_list.append(row_f)
             continue
 
-        # 2. VERIFICAR SI TUVO ABONOS PARCIALES ANTERIORES
+        # 2. ABONOS PARCIALES ANTERIORES
         r_hist_gen = mapa_hist_generico.get((sap, f_str)) or mapa_hist_generico.get((nom, f_str))
         if r_hist_gen is not None:
             v_inicial_hist = r_hist_gen['Valor_Faltante_Num']
@@ -286,7 +285,6 @@ def procesar_archivos(file_hist, file_anexo):
             if r_hist_gen['Nombre_Deudor_OK'] not in PALABRAS_PROHIBIDAS:
                 row_f['Nombre_Deudor_OK'] = r_hist_gen['Nombre_Deudor_OK']
 
-        # Clasificar según su saldo real actual
         if row_f['Saldo_Num'] <= 0.01:
             row_f['Abonos_Num'] = row_f['Valor_Faltante_Num']
             row_f['Saldo_Num'] = 0.0
@@ -305,7 +303,7 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY DEL ANEXO (PAGADOS TOTALMENTE)
+    # 3. FALTANTES ACTIVOS DEL MES ACTUAL QUE DESAPARECIERON HOY (CANCELADOS)
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
