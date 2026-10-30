@@ -249,7 +249,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON MAPEO EXACTO POSTOBÓN ---
+# --- CARGAR ANEXO EXCEL CON POSICIONES REALES DE TU CAPTURA ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -268,51 +268,21 @@ def cargar_anexo_excel(file_obj):
         header_idx = idx
         break
 
-    header_row = df_raw.iloc[header_idx].values
     df = df_raw.iloc[header_idx + 1 :].copy()
 
-    # Índices exactos según la estructura oficial del reporte de Postobón Popayán
-    col_sap_idx = 2  # DEUDOR SAP
-    col_fecha_idx = 3  # FECHA EN QUE GENERA
-    col_valor_idx = 6  # VALOR DEL FALTANTE
-    col_abono_idx = 7  # ABONOS REALIZADOS
-    col_saldo_idx = 8  # SALDO
-    col_titular_idx = 10  # NOMBRE DEL RESPONSABLE
-    col_motivo_idx = 11  # MOTIVOS
-
-    for i, h in enumerate(header_row):
-      h_str = str(h).upper().replace("\n", " ").strip()
-      if "DEUDOR SAP" in h_str or "SAP" in h_str:
-        col_sap_idx = i
-      elif "FECHA EN QUE GENERA" in h_str or (
-          "FECHA" in h_str and "GENERA" in h_str
-      ):
-        col_fecha_idx = i
-      elif (
-          "VALOR" in h_str
-          and "SALDO" not in h_str
-          and "ABONO" not in h_str
-          and "NIT" not in h_str
-      ):
-        col_valor_idx = i
-      elif "ABONO" in h_str and "SALDO" not in h_str:
-        col_abono_idx = i
-      elif "SALDO" in h_str and "VALOR" not in h_str:
-        col_saldo_idx = i
-      elif (
-          "NOMBRE DEL RESPONSABLE" in h_str
-          or "RESPONSABLE" in h_str
-          or "ZONA" in h_str
-      ):
-        col_titular_idx = i
-      elif "MOTIVO" in h_str:
-        col_motivo_idx = i
+    # ÍNDICES EXACTOS BASADOS EN TU FOTO REAL DEL EXCEL DE POSTOBÓN:
+    col_sap_idx = 2  # Código deudor SAP (Ej: 3100000796)
+    col_fecha_idx = 1  # Fecha en que genera (Ej: 09/05/2026)
+    col_valor_idx = 4  # Valor del Faltante (Ej: 1.660.881)
+    col_abono_idx = 5  # Abonos Realizados (Ej: 700.000)
+    col_saldo_idx = 6  # Saldo (Ej: 960.881)
+    col_titular_idx = 10  # Nombre del responsable (Ej: Eduar Montenegro)
+    col_motivo_idx = 12  # Motivos / Observaciones
 
     st.sidebar.success(
-        f"✅ **Estructura Postobón Correcta**\n- Fila Encabezados:"
-        f" `{header_idx}`\n- Valor (Col {col_valor_idx})\n- Abono (Col"
-        f" {col_abono_idx})\n- Saldo (Col {col_saldo_idx})\n- SAP (Col"
-        f" {col_sap_idx})"
+        f"✅ **Mapeo Real Postobón Cargado**\n- Fila Encabezados:"
+        f" `{header_idx}`\n- Valor (Col `{col_valor_idx}`)\n- Abono (Col"
+        f" `{col_abono_idx}`)\n- Saldo (Col `{col_saldo_idx}`)"
     )
 
     nombres_finales, saps_finales, mot_finales = [], [], []
@@ -336,7 +306,7 @@ def cargar_anexo_excel(file_obj):
           else 0.0
       )
 
-      # Si el valor inicial está en 0 pero hay saldo o abono, lo reconstruimos
+      # Respaldo automático por si el valor inicial viene vacío pero hay saldo
       if val_imp <= 0:
         if val_sal > 0 or val_abo > 0:
           val_imp = val_sal + val_abo
@@ -366,7 +336,7 @@ def cargar_anexo_excel(file_obj):
 
       f_val = row.iloc[col_fecha_idx] if col_fecha_idx < len(row) else pd.NaT
 
-      # Validación contable estricta
+      # Validación contable de cierre
       if val_sal == 0.0 and val_imp > 0 and val_abo > 0:
         val_sal = max(0.0, val_imp - val_abo)
       elif val_abo == 0.0 and val_imp > 0 and val_sal > 0:
