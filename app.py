@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON MAPEO ESTRICTO DE COLUMNAS ---
+# --- CARGAR ANEXO EXCEL CON MAPEO 100% BLINDADO ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -317,30 +317,31 @@ def cargar_anexo_excel(file_obj):
             next((c for c in df.columns if "FECHA" in c), None),
         )
 
-        # BÚSQUEDA PRECISA PARA EVITAR CRUCES ENTRE VALOR Y SALDO
-        col_valor = next(
-            (
-                c
-                for c in df.columns
-                if ("VALOR" in c and "FALTANT" in c) or "IMPORTE" in c
-            ),
-            None,
-        )
-        if not col_valor:
-            col_valor = next((c for c in df.columns if "VALOR" in c), None)
+        # BÚSQUEDA ESTRICTAMENTE SEPARADA PARA EVITAR CRUCES
+        col_valor = None
+        for c in df.columns:
+            c_up = str(c).upper()
+            if (
+                ("VALOR" in c_up or "IMPORTE" in c_up)
+                and "SALDO" not in c_up
+                and "ABONO" not in c_up
+            ):
+                col_valor = c
+                break
 
-        col_abono = next((c for c in df.columns if "ABONO" in c), None)
+        col_abono = None
+        for c in df.columns:
+            c_up = str(c).upper()
+            if "ABONO" in c_up and "SALDO" not in c_up:
+                col_abono = c
+                break
 
-        col_saldo = next(
-            (
-                c
-                for c in df.columns
-                if "SALDO" in c and "ABONO" not in c and "VALOR" not in c
-            ),
-            None,
-        )
-        if not col_saldo:
-            col_saldo = next((c for c in df.columns if "SALDO" in c), None)
+        col_saldo = None
+        for c in df.columns:
+            c_up = str(c).upper()
+            if "SALDO" in c_up:
+                col_saldo = c
+                break
 
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
@@ -367,10 +368,6 @@ def cargar_anexo_excel(file_obj):
                 if col_saldo
                 else (val_imp - val_abo)
             )
-
-            # Si el saldo no viene calculado pero hay valor y abono
-            if val_sal == 0.0 and val_imp > 0 and val_abo == 0.0:
-                val_sal = val_imp
 
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
