@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON MAPEO 100% BLINDADO ---
+# --- CARGAR ANEXO EXCEL CON MAPEO BLINDADO ANTI-CONFUSIÓN DE SALDO ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -317,12 +317,12 @@ def cargar_anexo_excel(file_obj):
             next((c for c in df.columns if "FECHA" in c), None),
         )
 
-        # BÚSQUEDA ESTRICTAMENTE SEPARADA PARA EVITAR CRUCES
+        # BÚSQUEDA 100% BLINDADA: Excluye explícitamente la palabra SALDO para evitar choques con el paréntesis
         col_valor = None
         for c in df.columns:
             c_up = str(c).upper()
             if (
-                ("VALOR" in c_up or "IMPORTE" in c_up)
+                ("VALOR" in c_up or "IMPORTE" in c_up or "FALTANT" in c_up)
                 and "SALDO" not in c_up
                 and "ABONO" not in c_up
             ):
@@ -344,6 +344,12 @@ def cargar_anexo_excel(file_obj):
                 break
 
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
+
+        # Depuración en barra lateral para verificar mapeo exacto
+        st.sidebar.info(
+            f"🔎 **Mapeo Excel Detectado:**\n- Valor Inicial: `{col_valor}`\n-"
+            f" Abonos: `{col_abono}`\n- Saldo: `{col_saldo}`"
+        )
 
         nombres_finales, saps_finales, mot_finales = [], [], []
         importes_finales, abonos_finales, saldos_finales = [], [], []
@@ -389,6 +395,7 @@ def cargar_anexo_excel(file_obj):
 
         return df[df["Valor_Faltante_Num"] > 0].copy()
     except Exception as e:
+        st.error(f"Error leyendo el anexo: {e}")
         return pd.DataFrame()
 
 
