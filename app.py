@@ -206,7 +206,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CON CRUCE PRECISO POR MONTO ---
+# --- MOTOR DE AUDITORÍA CON CRUCE DE PRECISIÓN ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return "⚠️ Por favor sube el Anexo del día para realizar la auditoría.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -218,9 +218,8 @@ def procesar_archivos(file_hist, file_anexo):
         return "⚠️ El anexo cargado no tiene registros válidos.", None, None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         
     fechas_validas = df_anexo['Fecha_DT'].dropna()
-    fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-26')
+    fecha_dia_actual = fechas_validas.max() if not fechas_validas.empty else pd.Timestamp('2026-10-29')
     
-    # Rango reciente de comparación (últimos 4 días)
     fecha_limite_reciente = fecha_dia_actual - pd.Timedelta(days=4)
 
     mapa_hist_exacto = {}
@@ -248,13 +247,11 @@ def procesar_archivos(file_hist, file_anexo):
         f_str = f_dt.strftime('%Y-%m-%d') if pd.notna(f_dt) else ''
         monto_anexo = round(row['Valor_Faltante_Num'], 2)
         
-        # Guardar la combinación exacta con MONTO para diferenciar el de $5M del de $515k
         if sap and sap != '1': keys_exactas_anexo.add((sap, f_str, monto_anexo))
         if nom and nom not in PALABRAS_PROHIBIDAS: keys_exactas_anexo.add((nom, f_str, monto_anexo))
         
         row_f = row.copy()
         
-        # Si el histórico maestro tenía un registro exacto con abonos previos
         r_hist = mapa_hist_exacto.get((sap, f_str, monto_anexo)) or mapa_hist_exacto.get((nom, f_str, monto_anexo))
         if r_hist is not None:
             abonos_hist = r_hist['Abonos_Num']
@@ -278,7 +275,6 @@ def procesar_archivos(file_hist, file_anexo):
         nuevos = df_activos.copy()
         pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-    # 🟢 CAPTURAR REGISTROS QUE ESTABAN PENDIENTES EN EL HISTÓRICO Y DESAPARECIERON DEL ANEXO DE HOY
     saldados_hist_list = []
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
@@ -288,14 +284,11 @@ def procesar_archivos(file_hist, file_anexo):
             f_str_h = f_dt_h.strftime('%Y-%m-%d') if pd.notna(f_dt_h) else ''
             monto_h = round(r_hist['Valor_Faltante_Num'], 2)
             
-            # Solo comparar registros recientes (de los últimos 4 días del corte)
             es_reciente = pd.notna(f_dt_h) and (f_dt_h >= fecha_limite_reciente) and (f_dt_h.date() < fecha_dia_actual.date())
             
-            # Verificar si este monto EXACTO vino en el anexo de hoy
             esta_en_anexo = (sap_h != '1' and (sap_h, f_str_h, monto_h) in keys_exactas_anexo) or \
                             (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h, monto_h) in keys_exactas_anexo)
             
-            # Si estaba pendiente (> 0) en el histórico reciente y HOY ya no está en el anexo -> ¡PAGADO / SALDADO!
             if es_reciente and not esta_en_anexo and r_hist['Saldo_Num'] > 0:
                 row_pagado = r_hist.copy()
                 row_pagado['Abonos_Num'] = row_pagado['Valor_Faltante_Num']
