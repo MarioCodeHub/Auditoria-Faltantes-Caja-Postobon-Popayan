@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON POSICIÓN FIJA BLINDADA ---
+# --- CARGAR ANEXO EXCEL ROBUSTO Y SEGURO ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -271,24 +271,21 @@ def cargar_anexo_excel(file_obj):
             row_str = " ".join(
                 [str(c).upper().replace("\n", " ").strip() for c in row if pd.notna(c)]
             )
-            if ("VALOR" in row_str or "FALTANT" in row_str) and "FECHA" in row_str:
+            if "SAP" in row_str or "VALOR" in row_str or "FALTANT" in row_str:
                 header_idx = idx
                 break
 
         header_row = df_raw.iloc[header_idx].values
         df = df_raw.iloc[header_idx + 1 :].copy()
 
-        # Índices fijos estándar del formato CEDI Postobón Popayán
-        col_valor_idx = 6  # Valor del Faltante
-        col_abono_idx = 7  # Abonos Realizados
-        col_saldo_idx = 8  # Saldo
-        col_fecha_idx = 3  # Fecha en que se genera
-        col_sap_idx = 2  # Deudor SAP
-        col_cliente_idx = 1  # Código Cliente
-        col_titular_idx = 10  # Nombre del responsable
-        col_motivo_idx = 11  # Motivos
+        col_valor_idx = 6
+        col_abono_idx = 7
+        col_saldo_idx = 8
+        col_fecha_idx = 3
+        col_sap_idx = 2
+        col_titular_idx = 10
+        col_motivo_idx = 11
 
-        # Verificación inteligente por texto si la estructura varía ligeramente
         for i, h in enumerate(header_row):
             h_str = str(h).upper()
             if (
@@ -301,7 +298,7 @@ def cargar_anexo_excel(file_obj):
                 col_abono_idx = i
             elif "SALDO" in h_str:
                 col_saldo_idx = i
-            elif "FECHA" in h_str and "GENERA" in h_str:
+            elif "FECHA" in h_str and ("GENERA" in h_str or "TRANS" in h_str):
                 col_fecha_idx = i
             elif "SAP" in h_str or "DEUDOR" in h_str:
                 col_sap_idx = i
@@ -311,8 +308,7 @@ def cargar_anexo_excel(file_obj):
                 col_motivo_idx = i
 
         st.sidebar.success(
-            f"✅ **Columnas Excel Activas:**\n- Valor (Col {col_valor_idx})\n-"
-            f" Abono (Col {col_abono_idx})\n- Saldo (Col {col_saldo_idx})"
+            f"✅ **Excel Leído**\n- Fila Encabezados: `{header_idx}`"
         )
 
         nombres_finales, saps_finales, mot_finales = [], [], []
@@ -325,6 +321,9 @@ def cargar_anexo_excel(file_obj):
                 if col_valor_idx < len(row)
                 else 0.0
             )
+            if val_imp <= 0:
+                continue
+
             val_abo = (
                 limpiar_monto(row.iloc[col_abono_idx])
                 if col_abono_idx < len(row)
@@ -348,13 +347,15 @@ def cargar_anexo_excel(file_obj):
                 else ""
             )
 
-            nombre_ok = "RESPONSABLE / ZONA"
             if col_titular_idx < len(row) and pd.notna(
                 row.iloc[col_titular_idx]
             ):
                 txt = remover_tildes_y_raros(row.iloc[col_titular_idx])
-                if txt and txt not in PALABRAS_PROHIBIDAS and not txt.isdigit():
-                    nombre_ok = txt
+                nombre_ok = (
+                    txt
+                    if txt and txt not in PALABRAS_PROHIBIDAS and not txt.isdigit()
+                    else "RESPONSABLE / ZONA"
+                )
             else:
                 nombre_ok = extraer_nombre_real_fila(row)
 
@@ -362,7 +363,6 @@ def cargar_anexo_excel(file_obj):
                 row.iloc[col_fecha_idx] if col_fecha_idx < len(row) else pd.NaT
             )
 
-            # Lógica contable de respaldo por si el saldo o abono vienen en cero
             if val_imp > 0 and val_sal == 0.0 and val_abo == 0.0:
                 val_sal = val_imp
             elif val_imp > 0 and val_sal > 0 and val_abo == 0.0:
@@ -390,7 +390,7 @@ def cargar_anexo_excel(file_obj):
 
         return res_df[res_df["Valor_Faltante_Num"] > 0].copy()
     except Exception as e:
-        st.error(f"Error leyendo el anexo por posición: {e}")
+        st.error(f"Error leyendo el anexo: {e}")
         return pd.DataFrame()
 
 
@@ -416,7 +416,8 @@ def procesar_archivos(file_hist, file_anexo):
 
     if df_anexo.empty:
         return (
-            "⚠️ El anexo cargado no tiene registros válidos.",
+            "⚠️ El anexo cargado no tiene registros válidos o no se detectó"
+            " la fila de encabezados.",
             None,
             None,
             pd.DataFrame(),
@@ -431,7 +432,6 @@ def procesar_archivos(file_hist, file_anexo):
         if not fechas_validas.empty
         else pd.Timestamp("2026-10-29")
     )
-
     fecha_limite_reciente = fecha_dia_actual - pd.Timedelta(days=30)
 
     keys_exactas_anexo = set()
@@ -451,16 +451,7 @@ def procesar_archivos(file_hist, file_anexo):
             keys_exactas_anexo.add((nom, f_str, monto_anexo))
             keys_identidad_anexo.add((nom, f_str))
 
-    activos_list = []
-    for _, row in df_anexo.iterrows():
-        row_f = row.copy()
-        activos_list.append(row_f)
-
-    df_activos = (
-        pd.DataFrame(activos_list)
-        if activos_list
-        else pd.DataFrame(columns=df_anexo.columns)
-    )
+    df_activos = df_anexo.copy()
 
     if not df_activos.empty:
         df_con_saldo = df_activos[df_activos["Saldo_Num"] > 0].copy()
@@ -555,7 +546,6 @@ def procesar_archivos(file_hist, file_anexo):
                     "Motivo",
                 ]
             )
-
         out = pd.DataFrame()
         out["Nombre Deudor"] = df_in["Nombre_Deudor_OK"]
         out["SAP"] = df_in["Deudor_SAP_OK"]
@@ -620,7 +610,6 @@ def procesar_archivos(file_hist, file_anexo):
         color_discrete_map=colores,
         hole=0.4,
     )
-
     fig_bar = px.bar(
         df_summary,
         x="Categoría",
@@ -679,11 +668,12 @@ if ejecutar:
         st.markdown("---")
         st.markdown(m_str)
 
-        gcol1, gcol2 = st.columns(2)
-        with gcol1:
-            st.plotly_chart(fig_pie, use_container_width=True)
-        with gcol2:
-            st.plotly_chart(fig_bar, use_container_width=True)
+        if fig_pie is not None and fig_bar is not None:
+            gcol1, gcol2 = st.columns(2)
+            with gcol1:
+                st.plotly_chart(fig_pie, use_container_width=True)
+            with gcol2:
+                st.plotly_chart(fig_bar, use_container_width=True)
 
         st.markdown(
             "## 📄 **Detalle de Registros (Listos para Copiar y Pegar)**"
