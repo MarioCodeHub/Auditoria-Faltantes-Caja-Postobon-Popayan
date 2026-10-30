@@ -379,7 +379,7 @@ def cargar_anexo_excel(file_obj):
         return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CON CRUCE ROBUSTO POR SAP + FECHA ---
+# --- MOTOR DE AUDITORÍA ROBUSTO Y EQUILIBRADO ---
 def procesar_archivos(file_hist, file_anexo):
     if file_anexo is None:
         return (
@@ -417,7 +417,11 @@ def procesar_archivos(file_hist, file_anexo):
         else pd.Timestamp("2026-10-29")
     )
 
-    # Creamos llaves basadas estrictamente en SAP/Nombre + Fecha (SIN el monto para evitar que los abonos rompan el cruce)
+    # Ventana razonable para detectar saldados recientes (últimos 30 días)
+    fecha_limite_reciente = fecha_dia_actual - pd.Timedelta(days=30)
+
+    # Llaves exactas del anexo actual para cruce seguro
+    keys_exactas_anexo = set()
     keys_identidad_anexo = set()
 
     for _, row in df_anexo.iterrows():
@@ -425,44 +429,19 @@ def procesar_archivos(file_hist, file_anexo):
         nom = str(row["Nombre_Deudor_OK"]).strip().upper()
         f_dt = row["Fecha_DT"]
         f_str = f_dt.strftime("%Y-%m-%d") if pd.notna(f_dt) else ""
+        monto_anexo = round(float(row["Valor_Faltante_Num"]), 2)
 
         if sap and sap != "1":
+            keys_exactas_anexo.add((sap, f_str, monto_anexo))
             keys_identidad_anexo.add((sap, f_str))
         if nom and nom not in PALABRAS_PROHIBIDAS:
+            keys_exactas_anexo.add((nom, f_str, monto_anexo))
             keys_identidad_anexo.add((nom, f_str))
 
+    # Procesar Activos directamente del anexo del día
     activos_list = []
     for _, row in df_anexo.iterrows():
-        sap = str(row["Deudor_SAP_OK"]).strip()
-        nom = str(row["Nombre_Deudor_OK"]).strip().upper()
-        f_dt = row["Fecha_DT"]
-        f_str = f_dt.strftime("%Y-%m-%d") if pd.notna(f_dt) else ""
-
         row_f = row.copy()
-
-        # Buscar si existe en el histórico para complementar abonos si ya los traía registrados antes
-        if not df_hist.empty:
-            match_hist = df_hist[
-                ((df_hist["Deudor_SAP_OK"] == sap) & (sap != "1"))
-                | (df_hist["Nombre_Deudor_OK"] == nom)
-            ]
-            # Filtro por fecha similar si es necesario
-            if not match_hist.empty:
-                # Tomamos el registro histórico correspondiente por fecha de origen
-                match_fecha = match_hist[
-                    match_hist["Fecha_DT"].dt.strftime("%Y-%m-%d") == f_str
-                ]
-                r_hist = (
-                    match_fecha.iloc[0]
-                    if not match_fecha.empty
-                    else match_hist.iloc[0]
-                )
-                if row_f["Abonos_Num"] == 0 and r_hist["Abonos_Num"] > 0:
-                    row_f["Abonos_Num"] = r_hist["Abonos_Num"]
-                    row_f["Saldo_Num"] = max(
-                        0.0, row_f["Valor_Faltante_Num"] - row_f["Abonos_Num"]
-                    )
-
         activos_list.append(row_f)
 
     df_activos = (
@@ -476,7 +455,7 @@ def procesar_archivos(file_hist, file_anexo):
         df_con_saldo = df_activos[df_activos["Saldo_Num"] > 0].copy()
         df_saldados_en_anexo = df_activos[
             df_activos["Saldo_Num"] <= 0
-        ].copy()  # Los que ya llegaron a $0 en el anexo de hoy
+        ].copy()  # Los que llegaron a $0 en el anexo
 
         if pd.notna(fecha_dia_actual):
             es_dia_actual = (
@@ -494,7 +473,7 @@ def procesar_archivos(file_hist, file_anexo):
         pendientes = pd.DataFrame(columns=df_anexo.columns)
         df_saldados_en_anexo = pd.DataFrame(columns=df_anexo.columns)
 
-    # SALDADOS: Los que llegaron a saldo 0 en el anexo + los del histórico que YA DESAPARECIERON del anexo
+    # SALDADOS: Los que llegaron a saldo 0 en el anexo + los de los últimos 30 días que desaparecieron del anexo
     saldados_hist_list = []
 
     if not df_saldados_en_anexo.empty:
@@ -510,15 +489,36 @@ def procesar_archivos(file_hist, file_anexo):
             nom_h = str(r_hist["Nombre_Deudor_OK"]).strip().upper()
             f_dt_h = r_hist["Fecha_DT"]
             f_str_h = f_dt_h.strftime("%Y-%m-%d") if pd.notna(f_dt_h) else ""
+            monto_h = round(float(r_hist["Valor_Faltante_Num"]), 2)
 
             if pd.notna(f_dt_h) and f_dt_h.date() == fecha_dia_actual.date():
                 continue
 
-            # Verificamos si este deudor sigue vivo en el anexo actual por su identidad (SAP/Nombre + Fecha)
-            sigue_en_anexo = (sap_h != "1" and (sap_h, f_str_h) in keys_identidad_anexo) or \
-                             (nom_h not in PALABRAS_PROHIBIDAS and (nom_h, f_str_h) in keys_identidad_anexo)
+            # Evaluar únicamente registros que sean recientes (últimos 30 días) para evitar tocar deudas viejas
+            es_reciente = (
+                pd.notna(f_dt_h)
+                and (f_dt_h >= fecha_limite_reciente)
+                and (f_dt_h.date() < fecha_dia_actual.date())
+            )
+            if not es_reciente:
+                continue
 
-            # Si ya NO está en el anexo del día y antes tenía saldo pendiente -> ¡Fue completamente liquidado!
+            # Verificar si sigue en el anexo de hoy
+            sigue_en_anexo = (
+                sap_h != "1"
+                and (
+                    (sap_h, f_str_h, monto_h) in keys_exactas_anexo
+                    or (sap_h, f_str_h) in keys_identidad_anexo
+                )
+            ) or (
+                nom_h not in PALABRAS_PROHIBIDAS
+                and (
+                    (nom_h, f_str_h, monto_h) in keys_exactas_anexo
+                    or (nom_h, f_str_h) in keys_identidad_anexo
+                )
+            )
+
+            # Si era reciente, tenía saldo y ya no está en el anexo -> ¡Fue Saldado!
             if not sigue_en_anexo and r_hist["Saldo_Num"] > 0:
                 row_pagado = r_hist.copy()
                 row_pagado["Abonos_Num"] = row_pagado["Valor_Faltante_Num"]
