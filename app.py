@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON BUSCADOR INFALIBLE DE ENCABEZADOS ---
+# --- CARGAR ANEXO EXCEL CON ESCANEO INFALIBLE ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -266,32 +266,36 @@ def cargar_anexo_excel(file_obj):
         df_raw = pd.DataFrame(list(sheet.values))
         df_raw = df_raw.dropna(how="all").reset_index(drop=True)
 
-        # BUSCADOR INFALIBLE: Busca la fila exacta que contiene el SAP o el Código Cliente
-        header_idx = 6  # Fila predeterminada por defecto en el formato CEDI
+        header_idx = 6
         for idx, row in df_raw.iterrows():
             row_str = " ".join(
                 [str(c).upper().replace("\n", " ").strip() for c in row if pd.notna(c)]
             )
-            if "DEUDOR SAP" in row_str or "CODIGO CLI" in row_str:
+            if "SAP" in row_str or "CODIGO" in row_str or "VALOR" in row_str:
                 header_idx = idx
                 break
 
         header_row = df_raw.iloc[header_idx].values
         df = df_raw.iloc[header_idx + 1 :].copy()
 
-        # Índices estándar de columnas en Postobón Popayán
+        col_sap_idx = 2
+        col_fecha_idx = 3
         col_valor_idx = 6
         col_abono_idx = 7
         col_saldo_idx = 8
-        col_fecha_idx = 3
-        col_sap_idx = 2
         col_titular_idx = 10
         col_motivo_idx = 11
 
         for i, h in enumerate(header_row):
             h_str = str(h).upper()
-            if (
-                ("VALOR" in h_str or "FALTANT" in h_str)
+            if "SAP" in h_str or "DEUDOR" in h_str:
+                col_sap_idx = i
+            elif "FECHA" in h_str and (
+                "GENERA" in h_str or "TRANS" in h_str or "REG" in h_str
+            ):
+                col_fecha_idx = i
+            elif (
+                ("VALOR" in h_str or "FALTANT" in h_str or "IMPORTE" in h_str)
                 and "SALDO" not in h_str
                 and "ABONO" not in h_str
             ):
@@ -300,18 +304,12 @@ def cargar_anexo_excel(file_obj):
                 col_abono_idx = i
             elif "SALDO" in h_str:
                 col_saldo_idx = i
-            elif "FECHA" in h_str and ("GENERA" in h_str or "TRANS" in h_str):
-                col_fecha_idx = i
-            elif "SAP" in h_str or "DEUDOR" in h_str:
-                col_sap_idx = i
-            elif "RESPONSABLE" in h_str or "ZONA" in h_str:
+            elif (
+                "RESPONSABLE" in h_str or "ZONA" in h_str or "TITULAR" in h_str
+            ):
                 col_titular_idx = i
-            elif "MOTIVO" in h_str:
+            elif "MOTIVO" in h_str or "OBSERVAC" in h_str:
                 col_motivo_idx = i
-
-        st.sidebar.success(
-            f"✅ **Excel Leído Correctamente**\n- Fila Encabezados: `{header_idx}`"
-        )
 
         nombres_finales, saps_finales, mot_finales = [], [], []
         importes_finales, abonos_finales, saldos_finales = [], [], []
@@ -323,9 +321,6 @@ def cargar_anexo_excel(file_obj):
                 if col_valor_idx < len(row)
                 else 0.0
             )
-            if val_imp <= 0:
-                continue
-
             val_abo = (
                 limpiar_monto(row.iloc[col_abono_idx])
                 if col_abono_idx < len(row)
@@ -336,6 +331,17 @@ def cargar_anexo_excel(file_obj):
                 if col_saldo_idx < len(row)
                 else 0.0
             )
+
+            # RESPALDO INTELIGENTE: Si la columna principal dio 0, buscamos en cualquier celda de la fila un número de dinero válido
+            if val_imp <= 0:
+                for val in row.values:
+                    m = limpiar_monto(val)
+                    if m > 5000:
+                        val_imp = m
+                        break
+
+            if val_imp <= 0:
+                continue
 
             c_code = (
                 normalizar_sap(row.iloc[col_sap_idx])
@@ -365,7 +371,7 @@ def cargar_anexo_excel(file_obj):
                 row.iloc[col_fecha_idx] if col_fecha_idx < len(row) else pd.NaT
             )
 
-            if val_imp > 0 and val_sal == 0.0 and val_abo == 0.0:
+            if val_sal == 0.0 and val_imp > 0 and val_abo == 0.0:
                 val_sal = val_imp
             elif val_imp > 0 and val_sal > 0 and val_abo == 0.0:
                 val_abo = max(0.0, val_imp - val_sal)
@@ -418,8 +424,7 @@ def procesar_archivos(file_hist, file_anexo):
 
     if df_anexo.empty:
         return (
-            "⚠️ El anexo cargado no tiene registros válidos o no se detectó"
-            " la fila de encabezados.",
+            "⚠️ El anexo cargado no tiene registros válidos.",
             None,
             None,
             pd.DataFrame(),
