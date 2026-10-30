@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON MAPEO EXACTO DE POSTOBÓN ---
+# --- CARGAR ANEXO EXCEL CON MAPEO ESTRICTO DE COLUMNAS ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -290,7 +290,6 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
-        # Detección exacta de columnas del formato Postobón
         col_sap = next(
             (
                 c
@@ -318,24 +317,31 @@ def cargar_anexo_excel(file_obj):
             next((c for c in df.columns if "FECHA" in c), None),
         )
 
-        # Forzar captura precisa de Valor Inicial, Abonos y Saldo
+        # BÚSQUEDA PRECISA PARA EVITAR CRUCES ENTRE VALOR Y SALDO
         col_valor = next(
             (
                 c
                 for c in df.columns
-                if "VALOR DEL FALTANT" in c or "VALOR" in c or "IMPORTE" in c
+                if ("VALOR" in c and "FALTANT" in c) or "IMPORTE" in c
             ),
             None,
         )
-        col_abono = next(
+        if not col_valor:
+            col_valor = next((c for c in df.columns if "VALOR" in c), None)
+
+        col_abono = next((c for c in df.columns if "ABONO" in c), None)
+
+        col_saldo = next(
             (
                 c
                 for c in df.columns
-                if "ABONOS REALIZADOS" in c or "ABONO" in c
+                if "SALDO" in c and "ABONO" not in c and "VALOR" not in c
             ),
             None,
         )
-        col_saldo = next((c for c in df.columns if "SALDO" in c), None)
+        if not col_saldo:
+            col_saldo = next((c for c in df.columns if "SALDO" in c), None)
+
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
         nombres_finales, saps_finales, mot_finales = [], [], []
@@ -362,9 +368,9 @@ def cargar_anexo_excel(file_obj):
                 else (val_imp - val_abo)
             )
 
-            # Blindaje operativo: si por formato el saldo es 0 pero hay valor e igual abono, aseguramos coherencia
-            if val_sal <= 0 and val_imp > 0 and val_abo == 0:
-                val_abo = val_imp
+            # Si el saldo no viene calculado pero hay valor y abono
+            if val_sal == 0.0 and val_imp > 0 and val_abo == 0.0:
+                val_sal = val_imp
 
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
