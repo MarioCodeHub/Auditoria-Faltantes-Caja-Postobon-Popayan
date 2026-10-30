@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ---
+# --- CARGAR ANEXO EXCEL CON MAPEO EXACTO DE POSTOBÓN ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -290,27 +290,15 @@ def cargar_anexo_excel(file_obj):
         df = df.loc[:, df.columns.notna()].copy()
         df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
+        # Detección exacta de columnas del formato Postobón
         col_sap = next(
             (
                 c
                 for c in df.columns
-                if "DUEDOR SAP" in c
-                or "DEUDOR SAP" in c
-                or "DUEDOR" in c
-                or "DEUDOR" in c
+                if "DEUDOR SAP" in c or "SAP" in c or "DUEDOR" in c
             ),
             None,
         )
-        if not col_sap:
-            col_sap = next(
-                (
-                    c
-                    for c in df.columns
-                    if "SAP" in c and "CLE" not in c and "SI" not in c
-                ),
-                None,
-            )
-
         col_titular = next(
             (
                 c
@@ -323,13 +311,30 @@ def cargar_anexo_excel(file_obj):
             None,
         )
         col_cliente = next(
-            (c for c in df.columns if "OBSERVAC" in c or "CLIENTE" in c), None
+            (c for c in df.columns if "CLIENTE" in c or "OBSERVAC" in c), None
         )
-        col_fecha = next((c for c in df.columns if "FECHA" in c), None)
+        col_fecha = next(
+            (c for c in df.columns if "FECHA" in c and "GENERA" in c),
+            next((c for c in df.columns if "FECHA" in c), None),
+        )
+
+        # Forzar captura precisa de Valor Inicial, Abonos y Saldo
         col_valor = next(
-            (c for c in df.columns if "IMPORTE" in c or "VALOR" in c), None
+            (
+                c
+                for c in df.columns
+                if "VALOR DEL FALTANT" in c or "VALOR" in c or "IMPORTE" in c
+            ),
+            None,
         )
-        col_abono = next((c for c in df.columns if "ABONO" in c), None)
+        col_abono = next(
+            (
+                c
+                for c in df.columns
+                if "ABONOS REALIZADOS" in c or "ABONO" in c
+            ),
+            None,
+        )
         col_saldo = next((c for c in df.columns if "SALDO" in c), None)
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
@@ -348,6 +353,7 @@ def cargar_anexo_excel(file_obj):
                 if col_motivo and pd.notna(row[col_motivo])
                 else ""
             )
+
             val_imp = limpiar_monto(row[col_valor]) if col_valor else 0.0
             val_abo = limpiar_monto(row[col_abono]) if col_abono else 0.0
             val_sal = (
@@ -355,6 +361,10 @@ def cargar_anexo_excel(file_obj):
                 if col_saldo
                 else (val_imp - val_abo)
             )
+
+            # Blindaje operativo: si por formato el saldo es 0 pero hay valor e igual abono, aseguramos coherencia
+            if val_sal <= 0 and val_imp > 0 and val_abo == 0:
+                val_abo = val_imp
 
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
@@ -417,10 +427,8 @@ def procesar_archivos(file_hist, file_anexo):
         else pd.Timestamp("2026-10-29")
     )
 
-    # Ventana razonable para detectar saldados recientes (últimos 30 días)
     fecha_limite_reciente = fecha_dia_actual - pd.Timedelta(days=30)
 
-    # Llaves exactas del anexo actual para cruce seguro
     keys_exactas_anexo = set()
     keys_identidad_anexo = set()
 
@@ -438,7 +446,6 @@ def procesar_archivos(file_hist, file_anexo):
             keys_exactas_anexo.add((nom, f_str, monto_anexo))
             keys_identidad_anexo.add((nom, f_str))
 
-    # Procesar Activos directamente del anexo del día
     activos_list = []
     for _, row in df_anexo.iterrows():
         row_f = row.copy()
@@ -450,12 +457,9 @@ def procesar_archivos(file_hist, file_anexo):
         else pd.DataFrame(columns=df_anexo.columns)
     )
 
-    # SEPARAR ACTIVOS: Solo los que tienen Saldo Pendiente > 0 van a Nuevos o Pendientes
     if not df_activos.empty:
         df_con_saldo = df_activos[df_activos["Saldo_Num"] > 0].copy()
-        df_saldados_en_anexo = df_activos[
-            df_activos["Saldo_Num"] <= 0
-        ].copy()  # Los que llegaron a $0 en el anexo
+        df_saldados_en_anexo = df_activos[df_activos["Saldo_Num"] <= 0].copy()
 
         if pd.notna(fecha_dia_actual):
             es_dia_actual = (
@@ -473,7 +477,6 @@ def procesar_archivos(file_hist, file_anexo):
         pendientes = pd.DataFrame(columns=df_anexo.columns)
         df_saldados_en_anexo = pd.DataFrame(columns=df_anexo.columns)
 
-    # SALDADOS: Los que llegaron a saldo 0 en el anexo + los de los últimos 30 días que desaparecieron del anexo
     saldados_hist_list = []
 
     if not df_saldados_en_anexo.empty:
@@ -494,7 +497,6 @@ def procesar_archivos(file_hist, file_anexo):
             if pd.notna(f_dt_h) and f_dt_h.date() == fecha_dia_actual.date():
                 continue
 
-            # Evaluar únicamente registros que sean recientes (últimos 30 días) para evitar tocar deudas viejas
             es_reciente = (
                 pd.notna(f_dt_h)
                 and (f_dt_h >= fecha_limite_reciente)
@@ -503,7 +505,6 @@ def procesar_archivos(file_hist, file_anexo):
             if not es_reciente:
                 continue
 
-            # Verificar si sigue en el anexo de hoy
             sigue_en_anexo = (
                 sap_h != "1"
                 and (
@@ -518,7 +519,6 @@ def procesar_archivos(file_hist, file_anexo):
                 )
             )
 
-            # Si era reciente, tenía saldo y ya no está en el anexo -> ¡Fue Saldado!
             if not sigue_en_anexo and r_hist["Saldo_Num"] > 0:
                 row_pagado = r_hist.copy()
                 row_pagado["Abonos_Num"] = row_pagado["Valor_Faltante_Num"]
