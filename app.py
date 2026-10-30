@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ROBUSTO Y SEGURO ---
+# --- CARGAR ANEXO EXCEL CON BUSCADOR INFALIBLE DE ENCABEZADOS ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -266,18 +266,20 @@ def cargar_anexo_excel(file_obj):
         df_raw = pd.DataFrame(list(sheet.values))
         df_raw = df_raw.dropna(how="all").reset_index(drop=True)
 
-        header_idx = 0
+        # BUSCADOR INFALIBLE: Busca la fila exacta que contiene el SAP o el Código Cliente
+        header_idx = 6  # Fila predeterminada por defecto en el formato CEDI
         for idx, row in df_raw.iterrows():
             row_str = " ".join(
                 [str(c).upper().replace("\n", " ").strip() for c in row if pd.notna(c)]
             )
-            if "SAP" in row_str or "VALOR" in row_str or "FALTANT" in row_str:
+            if "DEUDOR SAP" in row_str or "CODIGO CLI" in row_str:
                 header_idx = idx
                 break
 
         header_row = df_raw.iloc[header_idx].values
         df = df_raw.iloc[header_idx + 1 :].copy()
 
+        # Índices estándar de columnas en Postobón Popayán
         col_valor_idx = 6
         col_abono_idx = 7
         col_saldo_idx = 8
@@ -308,7 +310,7 @@ def cargar_anexo_excel(file_obj):
                 col_motivo_idx = i
 
         st.sidebar.success(
-            f"✅ **Excel Leído**\n- Fila Encabezados: `{header_idx}`"
+            f"✅ **Excel Leído Correctamente**\n- Fila Encabezados: `{header_idx}`"
         )
 
         nombres_finales, saps_finales, mot_finales = [], [], []
