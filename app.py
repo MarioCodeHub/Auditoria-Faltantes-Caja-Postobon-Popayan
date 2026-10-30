@@ -329,14 +329,13 @@ def cargar_anexo_excel(file_obj):
         col_valor = next(
             (c for c in df.columns if "IMPORTE" in c or "VALOR" in c), None
         )
+        col_abono = next((c for c in df.columns if "ABONO" in c), None)
+        col_saldo = next((c for c in df.columns if "SALDO" in c), None)
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
-        nombres_finales, saps_finales, mot_finales, importes_finales = (
-            [],
-            [],
-            [],
-            [],
-        )
+        nombres_finales, saps_finales, mot_finales = [], [], []
+        importes_finales, abonos_finales, saldos_finales = [], [], []
+
         for _, row in df.iterrows():
             nombre_ok = extraer_nombre_real_fila(row, col_titular, col_cliente)
             c_code = (
@@ -350,17 +349,25 @@ def cargar_anexo_excel(file_obj):
                 else ""
             )
             val_imp = limpiar_monto(row[col_valor]) if col_valor else 0.0
+            val_abo = limpiar_monto(row[col_abono]) if col_abono else 0.0
+            val_sal = (
+                limpiar_monto(row[col_saldo])
+                if col_saldo
+                else (val_imp - val_abo)
+            )
 
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
             mot_finales.append(motivo)
             importes_finales.append(val_imp)
+            abonos_finales.append(val_abo)
+            saldos_finales.append(val_sal)
 
         df["Nombre_Deudor_OK"] = nombres_finales
         df["Deudor_SAP_OK"] = saps_finales
         df["Valor_Faltante_Num"] = importes_finales
-        df["Abonos_Num"] = 0.0
-        df["Saldo_Num"] = importes_finales
+        df["Abonos_Num"] = abonos_finales
+        df["Saldo_Num"] = saldos_finales
         df["Fecha_DT"] = (
             df[col_fecha].apply(convertir_a_fecha) if col_fecha else pd.NaT
         )
@@ -460,11 +467,11 @@ def procesar_archivos(file_hist, file_anexo):
         )
 
         if r_hist is not None:
-            abonos_hist = r_hist["Abonos_Num"]
-            if abonos_hist > 0:
-                row_f["Abonos_Num"] = abonos_hist
+            # Si el anexo trae abonos de 0 pero el histórico tenía abonos registrados, los complementamos
+            if row_f["Abonos_Num"] == 0 and r_hist["Abonos_Num"] > 0:
+                row_f["Abonos_Num"] = r_hist["Abonos_Num"]
                 row_f["Saldo_Num"] = max(
-                    0.0, row_f["Valor_Faltante_Num"] - abonos_hist
+                    0.0, row_f["Valor_Faltante_Num"] - row_f["Abonos_Num"]
                 )
             if r_hist["Deudor_SAP_OK"] != "1":
                 row_f["Deudor_SAP_OK"] = r_hist["Deudor_SAP_OK"]
@@ -479,19 +486,41 @@ def procesar_archivos(file_hist, file_anexo):
         else pd.DataFrame(columns=df_anexo.columns)
     )
 
-    if not df_activos.empty and pd.notna(fecha_dia_actual):
-        es_dia_actual = (
-            df_activos["Fecha_DT"].dt.date == fecha_dia_actual.date()
-        )
-        nuevos = df_activos[es_dia_actual].copy()
-        pendientes = df_activos[
-            df_activos["Fecha_DT"].dt.date != fecha_dia_actual.date()
-        ].copy()
-    else:
-        nuevos = df_activos.copy()
-        pendientes = pd.DataFrame(columns=df_anexo.columns)
+    # SEPARAR ACTIVOS: Solo los que tienen Saldo Pendiente > 0 van a Nuevos o Pendientes
+    if not df_activos.empty:
+        df_con_saldo = df_activos[df_activos["Saldo_Num"] > 0].copy()
+        df_saldados_en_anexo = df_activos[
+            df_activos["Saldo_Num"] <= 0
+        ].copy()  # Los que ya están en $0 en el anexo
 
+        if pd.notna(fecha_dia_actual):
+            es_dia_actual = (
+                df_con_saldo["Fecha_DT"].dt.date == fecha_dia_actual.date()
+            )
+            nuevos = df_con_saldo[es_dia_actual].copy()
+            pendientes = df_con_saldo[
+                df_con_saldo["Fecha_DT"].dt.date != fecha_dia_actual.date()
+            ].copy()
+        else:
+            nuevos = df_con_saldo.copy()
+            pendientes = pd.DataFrame(columns=df_anexo.columns)
+    else:
+        nuevos = pd.DataFrame(columns=df_anexo.columns)
+        pendientes = pd.DataFrame(columns=df_anexo.columns)
+        df_saldados_en_anexo = pd.DataFrame(columns=df_anexo.columns)
+
+    # SALDADOS: Históricos que ya no están en el anexo + los que aparecieron con saldo 0 en el anexo
     saldados_hist_list = []
+
+    # Añadir los que venían con saldo 0 en el anexo de hoy
+    if not df_saldados_en_anexo.empty:
+        for _, r_sal in df_saldados_en_anexo.iterrows():
+            row_pagado = r_sal.copy()
+            row_pagado["Abonos_Num"] = row_pagado["Valor_Faltante_Num"]
+            row_pagado["Saldo_Num"] = 0.0
+            saldados_hist_list.append(row_pagado)
+
+    # Añadir los del histórico que ya desaparecieron por completo del anexo
     if not df_hist.empty:
         for _, r_hist in df_hist.iterrows():
             sap_h = str(r_hist["Deudor_SAP_OK"]).strip()
