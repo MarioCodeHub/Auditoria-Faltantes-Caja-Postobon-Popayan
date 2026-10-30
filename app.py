@@ -256,7 +256,7 @@ def cargar_historico_csv(file_obj):
         return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON MAPEO BLINDADO ANTI-CONFUSIÓN DE SALDO ---
+# --- CARGAR ANEXO EXCEL CON DETECCIÓN POR POSICIÓN Y RESPALDO MATEMÁTICO ---
 def cargar_anexo_excel(file_obj):
     if file_obj is None:
         return pd.DataFrame()
@@ -317,38 +317,28 @@ def cargar_anexo_excel(file_obj):
             next((c for c in df.columns if "FECHA" in c), None),
         )
 
-        # BÚSQUEDA 100% BLINDADA: Excluye explícitamente la palabra SALDO para evitar choques con el paréntesis
+        # BUSCADORES AMPLIADOS PARA EVITAR NULOS
         col_valor = None
+        col_abono = None
+        col_saldo = None
+
         for c in df.columns:
             c_up = str(c).upper()
-            if (
-                ("VALOR" in c_up or "IMPORTE" in c_up or "FALTANT" in c_up)
-                and "SALDO" not in c_up
-                and "ABONO" not in c_up
+            if not col_valor and (
+                "VALOR" in c_up or "IMPORTE" in c_up or "FALTANT" in c_up
             ):
                 col_valor = c
-                break
-
-        col_abono = None
-        for c in df.columns:
-            c_up = str(c).upper()
-            if "ABONO" in c_up and "SALDO" not in c_up:
+            elif not col_abono and ("ABONO" in c_up or "REALIZADO" in c_up):
                 col_abono = c
-                break
-
-        col_saldo = None
-        for c in df.columns:
-            c_up = str(c).upper()
-            if "SALDO" in c_up:
+            elif not col_saldo and "SALDO" in c_up:
                 col_saldo = c
-                break
 
         col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
-        # Depuración en barra lateral para verificar mapeo exacto
+        # Barra lateral de depuración para ver qué encontró exactamente
         st.sidebar.info(
-            f"🔎 **Mapeo Excel Detectado:**\n- Valor Inicial: `{col_valor}`\n-"
-            f" Abonos: `{col_abono}`\n- Saldo: `{col_saldo}`"
+            f"🔎 **Mapeo Real Excel:**\n- Valor: `{col_valor}`\n- Abono:"
+            f" `{col_abono}`\n- Saldo: `{col_saldo}`"
         )
 
         nombres_finales, saps_finales, mot_finales = [], [], []
@@ -369,11 +359,13 @@ def cargar_anexo_excel(file_obj):
 
             val_imp = limpiar_monto(row[col_valor]) if col_valor else 0.0
             val_abo = limpiar_monto(row[col_abono]) if col_abono else 0.0
-            val_sal = (
-                limpiar_monto(row[col_saldo])
-                if col_saldo
-                else (val_imp - val_abo)
-            )
+            val_sal = limpiar_monto(row[col_saldo]) if col_saldo else 0.0
+
+            # RESPALDO CONTABLE INTELIGENTE: Si el abono no se leyó pero hay saldo y valor inicial
+            if val_abo == 0.0 and val_imp > 0 and val_sal > 0 and val_sal < val_imp:
+                val_abo = val_imp - val_sal
+            elif val_sal == 0.0 and val_imp > 0:
+                val_sal = max(0.0, val_imp - val_abo)
 
             nombres_finales.append(nombre_ok)
             saps_finales.append(c_code)
