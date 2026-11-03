@@ -159,7 +159,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL DINÁMICO (POPAYÁN) ---
+# --- CARGAR ANEXO EXCEL POR POSICIONES EXACTAS (POPAYÁN) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -169,99 +169,72 @@ def cargar_anexo_excel(file_obj):
     df_raw = pd.DataFrame(list(sheet.values))
     df_raw = df_raw.dropna(how="all").reset_index(drop=True)
 
-    header_idx = -1
+    # Identificamos la fila de cabecera donde está "DEUDOR SAP" o "VALOR"
+    header_idx = 5  # Por defecto fila 6 (índice 5)
     for idx, row in df_raw.iterrows():
       row_str = " ".join(
           [str(c).upper().replace("\n", " ").strip() for c in row if pd.notna(c)]
       )
-      if (
-          "VALOR DEL FALTANTE" in row_str
-          or "DEUDOR SAP" in row_str
-          or "NOMBRE DEL RESPONSABLE" in row_str
-      ):
+      if "DEUDOR SAP" in row_str or "VALOR DEL FALTANTE" in row_str:
         header_idx = idx
         break
 
-    if header_idx == -1:
-      header_idx = 5  # Fila 6 por defecto según tu captura
-
-    headers = [
-        str(c).upper().replace("\n", " ").strip() if pd.notna(c) else f"COL_{i}"
-        for i, c in enumerate(df_raw.iloc[header_idx].values)
-    ]
+    # Tomamos los datos a partir de la siguiente fila
     df = df_raw.iloc[header_idx + 1 :].copy()
-    df.columns = headers[: len(df.columns)]
-    df = df.loc[:, df.columns.notna()].copy()
 
-    # Búsqueda inteligente y flexible de columnas basada en tus capturas
-    col_sap = next(
-        (c for c in df.columns if "DEUDOR SAP" in c or "CODIGO" in c), "COL_2"
-    )
-    col_fecha = next(
-        (
-            c
-            for c in df.columns
-            if "FECHA EN QUE GENERA" in c or "FECHA" in c
-        ),
-        "COL_3",
-    )
-    col_valor = next(
-        (
-            c
-            for c in df.columns
-            if "VALOR DEL FALTANTE" in c
-            or ("VALOR" in c and "SALDO" not in c and "ABONO" not in c)
-        ),
-        "COL_6",
-    )
-    col_abono = next(
-        (c for c in df.columns if "ABONOS" in c or "ABONO" in c), "COL_7"
-    )
-    col_saldo = next((c for c in df.columns if "SALDO" in c), "COL_8")
-    col_responsable = next(
-        (
-            c
-            for c in df.columns
-            if "RESPONSABLE" in c or "TITULAR" in c or "ZONA" in c
-        ),
-        "COL_10",
-    )
-    col_motivo = next((c for c in df.columns if "MOTIVO" in c), "COL_11")
+    # POSICIONES EXACTAS SEGÚN TU ESTRUCTURA DE POPAYÁN:
+    col_sap_idx = 2  # Columna C: DEUDOR SAP
+    col_fecha_idx = 3  # Columna D: FECHA EN QUE GENERA
+    col_valor_idx = 6  # Columna G: VALOR DEL FALTANTE
+    col_abono_idx = 7  # Columna H: ABONOS REALIZADOS
+    col_saldo_idx = 8  # Columna I: SALDO
+    col_responsable_idx = 10  # Columna K: NOMBRE DEL RESPONSABLE
+    col_motivo_idx = 11  # Columna L: MOTIVOS
 
     nombres_finales, saps_finales, mot_finales = [], [], []
     importes_finales, abonos_finales, saldos_finales = [], [], []
     fechas_finales = []
 
     for _, row in df.iterrows():
+      # Extraemos los valores de forma segura por índice de columna
       val_imp = (
-          limpiar_monto(row[col_valor]) if col_valor in row.index else 0.0
+          limpiar_monto(row.iloc[col_valor_idx])
+          if col_valor_idx < len(row)
+          else 0.0
       )
       val_abo = (
-          limpiar_monto(row[col_abono]) if col_abono in row.index else 0.0
+          limpiar_monto(row.iloc[col_abono_idx])
+          if col_abono_idx < len(row)
+          else 0.0
       )
       val_sal = (
-          limpiar_monto(row[col_saldo]) if col_saldo in row.index else 0.0
+          limpiar_monto(row.iloc[col_saldo_idx])
+          if col_saldo_idx < len(row)
+          else 0.0
       )
 
+      # Si el valor inicial viene vacío pero hay saldo o abono, lo reconstruimos
       if val_imp <= 0:
         if val_sal > 0 or val_abo > 0:
           val_imp = val_sal + val_abo
         else:
-          continue
+          continue  # Fila vacía o sin valor relevante
 
       c_code = (
-          normalizar_sap(row[col_sap])
-          if col_sap in row.index and pd.notna(row[col_sap])
+          normalizar_sap(row.iloc[col_sap_idx])
+          if col_sap_idx < len(row) and pd.notna(row.iloc[col_sap_idx])
           else "1"
       )
       motivo = (
-          str(row[col_motivo]).strip()
-          if col_motivo in row.index and pd.notna(row[col_motivo])
+          str(row.iloc[col_motivo_idx]).strip()
+          if col_motivo_idx < len(row) and pd.notna(row.iloc[col_motivo_idx])
           else ""
       )
 
-      if col_responsable in row.index and pd.notna(row[col_responsable]):
-        txt = remover_tildes_y_raros(row[col_responsable])
+      if col_responsable_idx < len(row) and pd.notna(
+          row.iloc[col_responsable_idx]
+      ):
+        txt = remover_tildes_y_raros(row.iloc[col_responsable_idx])
         nombre_ok = (
             txt
             if txt and txt not in PALABRAS_PROHIBIDAS and not txt.isdigit()
@@ -270,8 +243,11 @@ def cargar_anexo_excel(file_obj):
       else:
         nombre_ok = "RESPONSABLE / ZONA"
 
-      f_val = row[col_fecha] if col_fecha in row.index else pd.NaT
+      f_val = (
+          row.iloc[col_fecha_idx] if col_fecha_idx < len(row) else pd.NaT
+      )
 
+      # Cuadre contable de saldos
       if val_sal == 0.0 and val_imp > 0 and val_abo > 0:
         val_sal = max(0.0, val_imp - val_abo)
       elif val_abo == 0.0 and val_imp > 0 and val_sal > 0:
