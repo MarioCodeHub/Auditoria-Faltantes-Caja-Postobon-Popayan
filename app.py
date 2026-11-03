@@ -128,7 +128,7 @@ def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
   return "RESPONSABLE / ZONA"
 
 
-# --- CARGAR HISTÓRICO CSV MAESTRO (CORREGIDO A TUS COLUMNAS REALES) ---
+# --- CARGAR HISTÓRICO CSV MAESTRO (FILTRADO AÑO >= 2026) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -161,11 +161,7 @@ def cargar_historico_csv(file_obj):
     header_row = rows[header_idx]
     data_rows = rows[header_idx + 1 :]
 
-    # Índices exactos según tu captura del CSV: Fecha (0/D), Importe (1/E), SAP (2/F), Titular (3/G)
-    col_fecha_i = 0
-    col_valor_i = 1
-    col_sap_i = 2
-    col_titular_i = 3
+    col_fecha_i, col_valor_i, col_sap_i, col_titular_i = 0, 1, 2, 3
 
     for i, h in enumerate(header_row):
       h_str = str(h).upper()
@@ -194,7 +190,8 @@ def cargar_historico_csv(file_obj):
       if not t_name or t_name in PALABRAS_PROHIBIDAS:
         t_name = "RESPONSABLE / ZONA"
 
-      if v_num > 0 and pd.notna(f_dt):
+      # Estricto: Solo registros desde 2026 para evitar desbordar memoria con históricos viejos
+      if v_num > 0 and pd.notna(f_dt) and f_dt.year >= 2026:
         parsed_rows.append({
             "Nombre_Deudor_OK": t_name,
             "Deudor_SAP_OK": s_code,
@@ -207,7 +204,7 @@ def cargar_historico_csv(file_obj):
         })
 
     df_hist = pd.DataFrame(parsed_rows)
-    return df_hist[df_hist["Valor_Faltante_Num"] > 0].copy()
+    return df_hist.copy()
   except Exception as e:
     return pd.DataFrame()
 
@@ -322,7 +319,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CRUZADO (HISTÓRICO + ANEXO) ---
+# --- MOTOR DE AUDITORÍA CRUZADO SEGURO ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -357,21 +354,22 @@ def procesar_archivos(file_hist, file_anexo):
       if not fechas_validas.empty
       else pd.Timestamp("2026-10-31")
   )
+  fecha_limite_reciente = fecha_dia_actual - pd.Timedelta(days=30)
 
-  # 1. Identificar registros del día actual vs días anteriores en el anexo
+  # 1. Separar Nuevos y Pendientes del Anexo del Día Actual
   if not df_anexo.empty:
     es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
     nuevos = df_anexo[es_dia_actual & (df_anexo["Saldo_Num"] > 0)].copy()
-    saldados_hoy = df_anexo[es_dia_actual & (df_anexo["Saldo_Num"] <= 0)].copy()
+    pendientes_anexo = df_anexo[
+        (~es_dia_actual) & (df_anexo["Saldo_Num"] > 0)
+    ].copy()
+    saldados_anexo = df_anexo[df_anexo["Saldo_Num"] <= 0].copy()
   else:
     nuevos = pd.DataFrame(columns=df_anexo.columns)
-    saldados_hoy = pd.DataFrame(columns=df_anexo.columns)
+    pendientes_anexo = pd.DataFrame(columns=df_anexo.columns)
+    saldados_anexo = pd.DataFrame(columns=df_anexo.columns)
 
-  # 2. Cruce con el histórico para extraer pendientes de días anteriores y saldados
-  saldados_list = []
-  for _, r_sal in saldados_hoy.iterrows():
-    saldados_list.append(r_sal)
-
+  # Llaves de lo que sigue activo con saldo en el anexo de hoy
   keys_en_anexo_con_saldo = set()
   for _, row in df_anexo.iterrows():
     if row["Saldo_Num"] > 0:
@@ -383,31 +381,51 @@ def procesar_archivos(file_hist, file_anexo):
           else ""
       )
       monto = round(float(row["Valor_Faltante_Num"]), 2)
-      keys_en_anexo_con_saldo.add((sap, f_str, monto))
-      keys_en_anexo_con_saldo.add((nom, f_str, monto))
+      if sap and sap != "1":
+        keys_en_anexo_con_saldo.add((sap, f_str, monto))
+      if nom and nom not in PALABRAS_PROHIBIDAS:
+        keys_en_anexo_con_saldo.add((nom, f_str, monto))
 
-  pendientes_list = []
+  # 2. Cruce controlado con ventana reciente
+  saldados_list = []
+  for _, r_sal in saldados_anexo.iterrows():
+    row_p = r_sal.copy()
+    if row_p["Abonos_Num"] <= 0:
+      row_p["Abonos_Num"] = row_p["Valor_Faltante_Num"]
+    row_p["Saldo_Num"] = 0.0
+    saldados_list.append(row_p)
+
+  pendientes_list = list(pendientes_anexo.to_dict("records"))
+
   if not df_hist.empty:
     for _, r_hist in df_hist.iterrows():
       f_dt_h = r_hist["Fecha_DT"]
-      if pd.notna(f_dt_h) and f_dt_h.date() >= fecha_dia_actual.date():
-        continue  # Ignoramos los del día actual en el histórico
+      if pd.isna(f_dt_h):
+        continue
+
+      # Ventana estricta: Solo evaluar histórico de los últimos 30 días respecto al día actual
+      if f_dt_h.date() >= fecha_dia_actual.date():
+        continue
+      if f_dt_h.date() < fecha_limite_reciente.date():
+        continue  # Ignoramos registros antiguos para evitar contaminación
 
       sap_h = str(r_hist["Deudor_SAP_OK"]).strip()
       nom_h = str(r_hist["Nombre_Deudor_OK"]).strip().upper()
-      f_str_h = f_dt_h.strftime("%Y-%m-%d") if pd.notna(f_dt_h) else ""
+      f_str_h = f_dt_h.strftime("%Y-%m-%d")
       monto_h = round(float(r_hist["Valor_Faltante_Num"]), 2)
 
-      # ¿Sigue con saldo pendiente en el anexo de hoy?
-      sigue_pendiente = (
-          (sap_h, f_str_h, monto_h) in keys_en_anexo_con_saldo
-          or (nom_h, f_str_h, monto_h) in keys_en_anexo_con_saldo
+      sigue_activo = (
+          (
+              sap_h != "1"
+              and (sap_h, f_str_h, monto_h) in keys_en_anexo_con_saldo
+          )
+          or (
+              nom_h not in PALABRAS_PROHIBIDAS
+              and (nom_h, f_str_h, monto_h) in keys_en_anexo_con_saldo
+          )
       )
 
-      if sigue_pendiente:
-        pendientes_list.append(r_hist)
-      else:
-        # Si estaba en el histórico de días anteriores y YA NO está con saldo en el anexo, ¡fue PAGADO/SALDADO!
+      if not sigue_activo and r_hist["Saldo_Num"] > 0:
         row_pagado = r_hist.copy()
         row_pagado["Abonos_Num"] = row_pagado["Valor_Faltante_Num"]
         row_pagado["Saldo_Num"] = 0.0
