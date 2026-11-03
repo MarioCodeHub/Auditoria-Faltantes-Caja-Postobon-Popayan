@@ -201,7 +201,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (DINÁMICO ESTILO JAMUNDÍ) ---
+# --- CARGAR ANEXO EXCEL (DINÁMICO) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -363,7 +363,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA CORREGIDO Y BLINDADO ---
+# --- MOTOR DE AUDITORÍA PERFECTAMENTE CALIBRADO ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -399,29 +399,23 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-10-31")
   )
 
-  # 1. Saldados (Saldo <= 0.01 en el anexo de hoy)
-  saldados = df_anexo[df_anexo["Saldo_Num"] <= 0.01].copy()
+  # 1. NUEVOS FALTANTES: ¡Todos los registros del día actual sin importar el saldo!
+  es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
+  nuevos = df_anexo[es_dia_actual].copy()
 
-  # 2. Con saldo pendiente en el anexo de hoy
-  con_saldo_anexo = df_anexo[df_anexo["Saldo_Num"] > 0.01].copy()
+  # Registros que NO son del día actual (días anteriores)
+  anteriores = df_anexo[~es_dia_actual].copy()
 
-  # 3. Nuevos Faltantes (Día Actual exacto) vs Pendientes Activos (Días anteriores)
-  if not con_saldo_anexo.empty and pd.notna(fecha_dia_actual):
-    es_dia_actual = (
-        con_saldo_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
-    )
-    nuevos = con_saldo_anexo[es_dia_actual].copy()
-    pendientes = con_saldo_anexo[~es_dia_actual].copy()
-  else:
-    nuevos = con_saldo_anexo.copy()
-    pendientes = pd.DataFrame(columns=df_anexo.columns)
+  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo pendiente > 0.01 (Ej: el de 960k)
+  pendientes = anteriores[anteriores["Saldo_Num"] > 0.01].copy()
 
-  # 4. Omitidos en Anexo (Comparación robusta contra Valor y Saldo del anexo)
+  # 3. FALTANTES SALDADOS / PAGADOS: Días anteriores con saldo en cero o menor
+  saldados = anteriores[anteriores["Saldo_Num"] <= 0.01].copy()
+
+  # 4. OMITIDOS EN ANEXO: Del histórico con saldo > 0 que NO aparecen por ningún lado en el anexo de hoy
   omitidos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
-
-    # Unimos tanto los valores iniciales como los saldos presentes en el anexo de hoy
     montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2)).union(
         set(df_anexo["Saldo_Num"].round(2))
     )
@@ -430,7 +424,6 @@ def procesar_archivos(file_hist, file_anexo):
     for _, row in pendientes_hist.iterrows():
       monto_hist = round(float(row["Valor_Faltante_Num"]), 2)
       saldo_hist = round(float(row["Saldo_Num"]), 2)
-      # Si ni el valor ni el saldo histórico aparecen en el anexo actual, está omitido
       if (
           monto_hist not in montos_presentes_hoy
           and saldo_hist not in montos_presentes_hoy
