@@ -83,51 +83,6 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-def extraer_nombre_real_fila(row, col_titular=None, col_cliente=None):
-  if col_titular and col_titular in row.index and pd.notna(row[col_titular]):
-    txt = remover_tildes_y_raros(row[col_titular])
-    if (
-        txt
-        and not txt.isdigit()
-        and len(txt) > 2
-        and txt not in PALABRAS_PROHIBIDAS
-    ):
-      return txt
-
-  if col_cliente and col_cliente in row.index and pd.notna(row[col_cliente]):
-    txt = remover_tildes_y_raros(row[col_cliente])
-    if (
-        txt
-        and not txt.isdigit()
-        and len(txt) > 2
-        and txt not in PALABRAS_PROHIBIDAS
-    ):
-      txt_clean = re.sub(r"^CLIENTE\s+\d+\s*", "", txt).strip()
-      if txt_clean and not txt_clean.isdigit() and len(txt_clean) > 2:
-        return txt_clean
-      elif txt and not txt.isdigit():
-        return txt
-
-  for val in row.values:
-    if pd.notna(val):
-      txt = remover_tildes_y_raros(val)
-      if (
-          txt
-          and not txt.isdigit()
-          and not re.match(r"^\d{2}/\d{2}/\d{4}$", txt)
-          and len(txt) > 3
-      ):
-        if txt not in PALABRAS_PROHIBIDAS and not txt.startswith("31000"):
-          if (
-              "PAGO" not in txt
-              and "FACTURA" not in txt
-              and "DIFERENCIA" not in txt
-          ):
-            return txt
-
-  return "RESPONSABLE / ZONA"
-
-
 # --- CARGAR HISTÓRICO CSV MAESTRO ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
@@ -161,7 +116,7 @@ def cargar_historico_csv(file_obj):
     header_row = rows[header_idx]
     data_rows = rows[header_idx + 1 :]
 
-    col_fecha_i, col_valor_i, col_sap_i, col_titular_i = 0, 1, 2, 3
+    col_fecha_i, col_valor_i, col_sap_i, col_titular_i = 3, 4, 5, 6
     for i, h in enumerate(header_row):
       h_str = str(h).upper()
       if "FECHA" in h_str:
@@ -204,7 +159,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL CON POSICIONES EXACTAS DE POPAYÁN ---
+# --- CARGAR ANEXO EXCEL DINÁMICO (POPAYÁN) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -214,25 +169,64 @@ def cargar_anexo_excel(file_obj):
     df_raw = pd.DataFrame(list(sheet.values))
     df_raw = df_raw.dropna(how="all").reset_index(drop=True)
 
-    header_idx = 5
+    header_idx = -1
     for idx, row in df_raw.iterrows():
       row_str = " ".join(
           [str(c).upper().replace("\n", " ").strip() for c in row if pd.notna(c)]
       )
-      if "DEUDOR SAP" in row_str or "VALOR DEL FALTANTE" in row_str:
+      if (
+          "VALOR DEL FALTANTE" in row_str
+          or "DEUDOR SAP" in row_str
+          or "NOMBRE DEL RESPONSABLE" in row_str
+      ):
         header_idx = idx
         break
 
-    df = df_raw.iloc[header_idx + 1 :].copy()
+    if header_idx == -1:
+      header_idx = 5  # Fila 6 por defecto según tu captura
 
-    # POSICIONES EXACTAS SEGÚN TU EXCEL DE POPAYÁN:
-    col_sap_idx = 2  # Deudor SAP
-    col_fecha_idx = 3  # Fecha en que genera
-    col_valor_idx = 6  # Valor del faltante
-    col_abono_idx = 7  # Abonos realizados
-    col_saldo_idx = 8  # Saldo
-    col_titular_idx = 10  # Nombre del responsable
-    col_motivo_idx = 11  # Motivos
+    headers = [
+        str(c).upper().replace("\n", " ").strip() if pd.notna(c) else f"COL_{i}"
+        for i, c in enumerate(df_raw.iloc[header_idx].values)
+    ]
+    df = df_raw.iloc[header_idx + 1 :].copy()
+    df.columns = headers[: len(df.columns)]
+    df = df.loc[:, df.columns.notna()].copy()
+
+    # Búsqueda inteligente y flexible de columnas basada en tus capturas
+    col_sap = next(
+        (c for c in df.columns if "DEUDOR SAP" in c or "CODIGO" in c), "COL_2"
+    )
+    col_fecha = next(
+        (
+            c
+            for c in df.columns
+            if "FECHA EN QUE GENERA" in c or "FECHA" in c
+        ),
+        "COL_3",
+    )
+    col_valor = next(
+        (
+            c
+            for c in df.columns
+            if "VALOR DEL FALTANTE" in c
+            or ("VALOR" in c and "SALDO" not in c and "ABONO" not in c)
+        ),
+        "COL_6",
+    )
+    col_abono = next(
+        (c for c in df.columns if "ABONOS" in c or "ABONO" in c), "COL_7"
+    )
+    col_saldo = next((c for c in df.columns if "SALDO" in c), "COL_8")
+    col_responsable = next(
+        (
+            c
+            for c in df.columns
+            if "RESPONSABLE" in c or "TITULAR" in c or "ZONA" in c
+        ),
+        "COL_10",
+    )
+    col_motivo = next((c for c in df.columns if "MOTIVO" in c), "COL_11")
 
     nombres_finales, saps_finales, mot_finales = [], [], []
     importes_finales, abonos_finales, saldos_finales = [], [], []
@@ -240,19 +234,13 @@ def cargar_anexo_excel(file_obj):
 
     for _, row in df.iterrows():
       val_imp = (
-          limpiar_monto(row.iloc[col_valor_idx])
-          if col_valor_idx < len(row)
-          else 0.0
+          limpiar_monto(row[col_valor]) if col_valor in row.index else 0.0
       )
       val_abo = (
-          limpiar_monto(row.iloc[col_abono_idx])
-          if col_abono_idx < len(row)
-          else 0.0
+          limpiar_monto(row[col_abono]) if col_abono in row.index else 0.0
       )
       val_sal = (
-          limpiar_monto(row.iloc[col_saldo_idx])
-          if col_saldo_idx < len(row)
-          else 0.0
+          limpiar_monto(row[col_saldo]) if col_saldo in row.index else 0.0
       )
 
       if val_imp <= 0:
@@ -262,27 +250,27 @@ def cargar_anexo_excel(file_obj):
           continue
 
       c_code = (
-          normalizar_sap(row.iloc[col_sap_idx])
-          if col_sap_idx < len(row) and pd.notna(row.iloc[col_sap_idx])
+          normalizar_sap(row[col_sap])
+          if col_sap in row.index and pd.notna(row[col_sap])
           else "1"
       )
       motivo = (
-          str(row.iloc[col_motivo_idx]).strip()
-          if col_motivo_idx < len(row) and pd.notna(row.iloc[col_motivo_idx])
+          str(row[col_motivo]).strip()
+          if col_motivo in row.index and pd.notna(row[col_motivo])
           else ""
       )
 
-      if col_titular_idx < len(row) and pd.notna(row.iloc[col_titular_idx]):
-        txt = remover_tildes_y_raros(row.iloc[col_titular_idx])
+      if col_responsable in row.index and pd.notna(row[col_responsable]):
+        txt = remover_tildes_y_raros(row[col_responsable])
         nombre_ok = (
             txt
             if txt and txt not in PALABRAS_PROHIBIDAS and not txt.isdigit()
             else "RESPONSABLE / ZONA"
         )
       else:
-        nombre_ok = extraer_nombre_real_fila(row)
+        nombre_ok = "RESPONSABLE / ZONA"
 
-      f_val = row.iloc[col_fecha_idx] if col_fecha_idx < len(row) else pd.NaT
+      f_val = row[col_fecha] if col_fecha in row.index else pd.NaT
 
       if val_sal == 0.0 and val_imp > 0 and val_abo > 0:
         val_sal = max(0.0, val_imp - val_abo)
@@ -329,6 +317,10 @@ def procesar_archivos(file_hist, file_anexo):
     )
 
   df_anexo = cargar_anexo_excel(file_anexo)
+  df_hist = (
+      cargar_historico_csv(file_hist) if file_hist is not None else pd.DataFrame()
+  )
+
   if df_anexo.empty:
     return (
         "⚠️ El anexo cargado no tiene registros válidos.",
@@ -359,7 +351,22 @@ def procesar_archivos(file_hist, file_anexo):
   # 3. Faltantes Saldados / Pagados (Saldo <= 0)
   saldados = df_anexo[df_anexo["Saldo_Num"] <= 0].copy()
 
-  omitidos = pd.DataFrame(columns=df_anexo.columns)
+  # 4. Omitidos en Anexo (Comparación exacta de montos con el histórico)
+  omitidos = pd.DataFrame()
+  if not df_hist.empty:
+    pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
+    montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2))
+
+    omitidos_list = []
+    for _, row in pendientes_hist.iterrows():
+      monto_hist = round(float(row["Valor_Faltante_Num"]), 2)
+      if monto_hist not in montos_presentes_hoy and row["Saldo_Num"] > 0:
+        omitidos_list.append(row)
+
+    if omitidos_list:
+      omitidos = pd.DataFrame(omitidos_list).drop_duplicates(
+          subset=["Deudor_SAP_OK", "Valor_Faltante_Num"]
+      )
 
   def preparar_df_ui(df_in):
     if df_in is None or df_in.empty:
@@ -492,7 +499,6 @@ if ejecutar:
     st.markdown("---")
     st.markdown(m_str)
 
-    # Protección de gráficos para evitar errores si alguna variable estuviera vacía
     if fig_pie is not None and fig_bar is not None:
       gcol1, gcol2 = st.columns(2)
       with gcol1:
