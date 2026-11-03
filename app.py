@@ -201,7 +201,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (DINÁMICO) ---
+# --- CARGAR ANEXO EXCEL (DINÁMICO CON AUTOCALCULO DE SALDO) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -299,6 +299,10 @@ def cargar_anexo_excel(file_obj):
         else:
           continue
 
+      # AUTOCALCULO DE SALDO SI VIENE EN CERO/VACÍO EN EL EXCEL
+      if val_sal <= 0 and val_imp > val_abo:
+        val_sal = max(0.0, val_imp - val_abo)
+
       c_code = (
           normalizar_sap(row[col_trans_code])
           if col_trans_code
@@ -332,13 +336,6 @@ def cargar_anexo_excel(file_obj):
           else pd.NaT
       )
 
-      if val_sal == 0.0 and val_imp > 0 and val_abo > 0:
-        val_sal = max(0.0, val_imp - val_abo)
-      elif val_abo == 0.0 and val_imp > 0 and val_sal > 0:
-        val_abo = max(0.0, val_imp - val_sal)
-      elif val_imp == 0.0 and val_sal > 0:
-        val_imp = val_sal + val_abo
-
       nombres_finales.append(nombre_ok)
       saps_finales.append(c_code)
       mot_finales.append(motivo)
@@ -363,7 +360,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA PERFECTAMENTE CALIBRADO ---
+# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -399,42 +396,49 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-10-31")
   )
 
-  # 1. NUEVOS FALTANTES: ¡Todos los registros del día actual sin importar el saldo!
+  # 1. NUEVOS FALTANTES: Registros cuya fecha es el día actual exacto
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
 
-  # Registros que NO son del día actual (días anteriores)
-  anteriores = df_anexo[~es_dia_actual].copy()
+  # Registros del anexo de días anteriores
+  anteriores_anexo = df_anexo[~es_dia_actual].copy()
 
-  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo pendiente > 0.01 (Ej: el de 960k)
-  pendientes = anteriores[anteriores["Saldo_Num"] > 0.01].copy()
+  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
+  pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # 3. FALTANTES SALDADOS / PAGADOS: Días anteriores con saldo en cero o menor
-  saldados = anteriores[anteriores["Saldo_Num"] <= 0.01].copy()
+  # 3. FALTANTES SALDADOS / PAGADOS:
+  # - Los que vienen en el anexo con saldo <= 0
+  saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
-  # 4. OMITIDOS EN ANEXO: Del histórico con saldo > 0 que NO aparecen por ningún lado en el anexo de hoy
-  omitidos = pd.DataFrame()
+  # - LÓGICA POPAYÁN: Los del histórico que DESAPARECIERON del anexo de hoy se consideran SALDADOS
+  saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
     montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2)).union(
         set(df_anexo["Saldo_Num"].round(2))
     )
 
-    omitidos_list = []
+    saldados_list = []
     for _, row in pendientes_hist.iterrows():
       monto_hist = round(float(row["Valor_Faltante_Num"]), 2)
       saldo_hist = round(float(row["Saldo_Num"]), 2)
+      # Si el registro pendiente del histórico ya no está en el anexo de hoy, fue saldado
       if (
           monto_hist not in montos_presentes_hoy
           and saldo_hist not in montos_presentes_hoy
-          and row["Saldo_Num"] > 0
       ):
-        omitidos_list.append(row)
+        saldados_list.append(row)
 
-    if omitidos_list:
-      omitidos = pd.DataFrame(omitidos_list).drop_duplicates(
+    if saldados_list:
+      saldados_historicos = pd.DataFrame(saldados_list).drop_duplicates(
           subset=["Deudor_SAP_OK", "Valor_Faltante_Num"]
       )
+
+  # Unimos los saldados del anexo y los saldados por desaparición del histórico
+  saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
+
+  # 4. OMITIDOS EN ANEXO: Vacío para Popayán (en Popayán desaparecer = saldado)
+  omitidos = pd.DataFrame(columns=df_anexo.columns)
 
   def preparar_df_ui(df_in):
     if df_in is None or df_in.empty:
@@ -470,10 +474,17 @@ def procesar_archivos(file_hist, file_anexo):
   df_pendientes_ui = preparar_df_ui(pendientes)
   df_omitidos_ui = preparar_df_ui(omitidos)
 
-  tot_nuevos = nuevos["Saldo_Num"].sum() if not nuevos.empty else 0
-  tot_saldados = saldados["Abonos_Num"].sum() if not saldados.empty else 0
-  tot_pendientes = pendientes["Saldo_Num"].sum() if not pendientes.empty else 0
-  tot_omitidos = omitidos["Saldo_Num"].sum() if not omitidos.empty else 0
+  # CÁLCULO DE MONTOS REALES PARA EL TABLERO
+  tot_nuevos = (
+      nuevos["Valor_Faltante_Num"].sum() if not nuevos.empty else 0
+  )
+  tot_saldados = (
+      saldados["Valor_Faltante_Num"].sum() if not saldados.empty else 0
+  )
+  tot_pendientes = (
+      pendientes["Saldo_Num"].sum() if not pendientes.empty else 0
+  )
+  tot_omitidos = 0
 
   m_str = f"## 🥤 **AUDITORÍA DE FALTANTES - POPAYÁN**\n\n"
   m_str += f"- 🔴 **Nuevos Faltantes (Día Actual - {formatear_fecha_ui(fecha_dia_actual)}):** {len(nuevos)} registro(s) | **${int(tot_nuevos):,}**\n"
