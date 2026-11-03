@@ -363,7 +363,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA ROBUSTO ---
+# --- MOTOR DE AUDITORÍA CORREGIDO Y BLINDADO ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -405,7 +405,7 @@ def procesar_archivos(file_hist, file_anexo):
   # 2. Con saldo pendiente en el anexo de hoy
   con_saldo_anexo = df_anexo[df_anexo["Saldo_Num"] > 0.01].copy()
 
-  # Nuevos Faltantes (Día Actual exacto) vs Pendientes Activos
+  # 3. Nuevos Faltantes (Día Actual exacto) vs Pendientes Activos (Días anteriores)
   if not con_saldo_anexo.empty and pd.notna(fecha_dia_actual):
     es_dia_actual = (
         con_saldo_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
@@ -416,16 +416,26 @@ def procesar_archivos(file_hist, file_anexo):
     nuevos = con_saldo_anexo.copy()
     pendientes = pd.DataFrame(columns=df_anexo.columns)
 
-  # 3. Omitidos en Anexo (Comparación exacta de montos con el histórico)
+  # 4. Omitidos en Anexo (Comparación robusta contra Valor y Saldo del anexo)
   omitidos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
-    montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2))
+
+    # Unimos tanto los valores iniciales como los saldos presentes en el anexo de hoy
+    montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2)).union(
+        set(df_anexo["Saldo_Num"].round(2))
+    )
 
     omitidos_list = []
     for _, row in pendientes_hist.iterrows():
       monto_hist = round(float(row["Valor_Faltante_Num"]), 2)
-      if monto_hist not in montos_presentes_hoy and row["Saldo_Num"] > 0:
+      saldo_hist = round(float(row["Saldo_Num"]), 2)
+      # Si ni el valor ni el saldo histórico aparecen en el anexo actual, está omitido
+      if (
+          monto_hist not in montos_presentes_hoy
+          and saldo_hist not in montos_presentes_hoy
+          and row["Saldo_Num"] > 0
+      ):
         omitidos_list.append(row)
 
     if omitidos_list:
