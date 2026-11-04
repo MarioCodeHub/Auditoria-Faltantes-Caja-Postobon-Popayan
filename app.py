@@ -1,4 +1,4 @@
-import csv
+import io
 import re
 import unicodedata
 import warnings
@@ -83,47 +83,23 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (LECTURA EXACTA DE TITULAR ZONA) ---
+# --- CARGAR HISTÓRICO CSV (CON AUTODETECTUM DE SEPARADOR Y NOMBRES) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
   try:
-    rows = []
-    content = file_obj.getvalue().decode("latin1", errors="ignore")
-    reader = csv.reader(content.splitlines(), delimiter=";")
-    for r in reader:
-      if any(str(cell).strip() for cell in r):
-        rows.append(r)
-
-    if not rows:
+    file_obj.seek(0)
+    df = pd.read_csv(
+        io.BytesIO(file_obj.getvalue()),
+        sep=None,
+        engine="python",
+        encoding="latin1",
+        on_bad_lines="skip",
+    )
+    if df.empty:
       return pd.DataFrame()
 
-    header_idx = 0
-    for idx, r in enumerate(rows):
-      row_str = " ".join([str(c).upper() for c in r])
-      if (
-          "VALOR" in row_str
-          or "IMPORTE" in row_str
-          or "SALDO" in row_str
-          or "TITULAR" in row_str
-      ):
-        header_idx = idx
-        break
-
-    headers = [
-        str(c).upper().replace("\n", " ").strip() for c in rows[header_idx]
-    ]
-    data_rows = rows[header_idx + 1 :]
-
-    if len(data_rows) > 5000:
-      data_rows = data_rows[-5000:]
-
-    df = pd.DataFrame(data_rows)
-    if len(headers) < len(df.columns):
-      headers += [f"COL_{i}" for i in range(len(headers), len(df.columns))]
-    df.columns = headers[: len(df.columns)]
-    df = df.loc[:, df.columns.notna()].copy()
-    df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+    df.columns = [str(c).upper().strip() for c in df.columns]
 
     col_sap = next(
         (
@@ -133,7 +109,6 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
-    # Búsqueda estricta en Titular Zona / Responsable
     col_nombre = next(
         (
             c
@@ -145,7 +120,6 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
-
     col_fecha = next((c for c in df.columns if "FECHA" in c), None)
     col_valor = next(
         (
@@ -433,8 +407,6 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # RECOPILAMOS TODOS LOS REGISTROS QUE SIGUEN VIVOS HOY EN EL ANEXO (POR SAP + FECHA)
-    # Esto blinda al 100% para que el de $960k y cualquier otro activo NUNCA vayan a saldados.
     claves_activas_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
@@ -448,7 +420,6 @@ def procesar_archivos(file_hist, file_anexo):
           str(row["Deudor_SAP_OK"]),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
-      # Si ya NO está en el anexo de hoy, se marca como saldado
       if key not in claves_activas_hoy:
         saldados_list.append(row)
 
