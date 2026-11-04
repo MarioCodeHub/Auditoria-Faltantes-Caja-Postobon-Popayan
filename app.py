@@ -55,6 +55,11 @@ def limpiar_monto(val):
 def convertir_a_fecha(val):
   if pd.isna(val):
     return pd.NaT
+  if isinstance(val, (int, float)):
+    try:
+      return pd.to_datetime(val, unit="D", origin="1899-12-30")
+    except:
+      return pd.NaT
   dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
   return dt
 
@@ -84,7 +89,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (CON LECTURA LIMPIA DE TITULAR ZONA) ---
+# --- CARGAR HISTÓRICO CSV ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -354,7 +359,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN (ORIGINAL + NOMBRES CORREGIDOS) ---
+# --- MOTOR DE AUDITORÍA POPAYÁN ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -387,28 +392,25 @@ def procesar_archivos(file_hist, file_anexo):
   fecha_dia_actual = (
       fechas_validas.max()
       if not fechas_validas.empty
-      else pd.Timestamp("2026-10-31")
+      else pd.Timestamp("2026-11-03")
   )
 
-  # 1. NUEVOS FALTANTES: Registros del día actual exacto
+  # 1. NUEVOS FALTANTES
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
 
   anteriores_anexo = df_anexo[~es_dia_actual].copy()
 
-  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
+  # 2. PENDIENTES ACTIVOS
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # 3. FALTANTES SALDADOS / PAGADOS:
-  # - Los que vienen en el anexo con saldo <= 0
+  # 3. FALTANTES SALDADOS / PAGADOS
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
-  # - LÓGICA POPAYÁN: Los del histórico que DESAPARECIERON del anexo de hoy se consideran SALDADOS
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # Cruce blindado por SAP + Fecha para evitar enviar activos pendientes (como el de $960k) a saldados
     claves_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
@@ -429,8 +431,6 @@ def procesar_archivos(file_hist, file_anexo):
       saldados_historicos = pd.DataFrame(saldados_list)
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
-
-  # 4. OMITIDOS EN ANEXO: Vacío para Popayán
   omitidos = pd.DataFrame(columns=df_anexo.columns)
 
   def preparar_df_ui(df_in):
