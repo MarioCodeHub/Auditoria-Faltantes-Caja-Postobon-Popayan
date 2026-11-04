@@ -83,7 +83,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (CON DETECCIÓN DE NOMBRE REAL DEL DEUDOR) ---
+# --- CARGAR HISTÓRICO CSV (CON CAPTURA EXACTA DEL DEUDOR) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -106,6 +106,7 @@ def cargar_historico_csv(file_obj):
           or "IMPORTE" in row_str
           or "SALDO" in row_str
           or "DUEDOR" in row_str
+          or "TITULAR" in row_str
       ):
         header_idx = idx
         break
@@ -137,16 +138,21 @@ def cargar_historico_csv(file_obj):
         (
             c
             for c in df.columns
-            if ("TITULAR" in c or "RESPONSABLE" in c or "NOMBRE" in c)
+            if any(
+                k in c
+                for k in [
+                    "TITULAR",
+                    "RESPONSABLE",
+                    "NOMBRE",
+                    "ZONA",
+                    "CLIENTE",
+                ]
+            )
             and "ZONA RV" not in c
+            and "SAP" not in c
         ),
         None,
     )
-    if not col_nombre:
-      col_nombre = next(
-          (c for c in df.columns if "ZONA" in c and "ZONA RV" not in c), None
-      )
-
     col_fecha = next((c for c in df.columns if "FECHA" in c), None)
     col_valor = next(
         (
@@ -165,19 +171,17 @@ def cargar_historico_csv(file_obj):
         if col_sap and col_sap in df.columns
         else "1"
     )
+
+    def limpiar_nombre_hist(val):
+      txt = remover_tildes_y_raros(val)
+      if not txt or txt in PALABRAS_PROHIBIDAS or txt.isdigit() or len(txt) <= 1:
+        return "RESPONSABLE / ZONA"
+      return txt
+
     df["Nombre_Deudor_OK"] = (
-        df[col_nombre].apply(remover_tildes_y_raros)
+        df[col_nombre].apply(limpiar_nombre_hist)
         if col_nombre and col_nombre in df.columns
         else "RESPONSABLE / ZONA"
-    )
-
-    # Reemplazo de palabras prohibidas o genéricas
-    df["Nombre_Deudor_OK"] = df["Nombre_Deudor_OK"].apply(
-        lambda x: (
-            "RESPONSABLE / ZONA"
-            if not x or x in PALABRAS_PROHIBIDAS or x.isdigit()
-            else x
-        )
     )
 
     df["Valor_Faltante_Num"] = (
@@ -429,10 +433,10 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
+    # CRUCE ESTRICTO POR SAP + FECHA (Evita falsos positivos como el de $960k)
     identificadores_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
-            df_anexo["Valor_Faltante_Num"].round(2),
             df_anexo["Fecha_DT"].dt.date,
         )
     )
@@ -441,9 +445,9 @@ def procesar_archivos(file_hist, file_anexo):
     for _, row in pendientes_hist.iterrows():
       key = (
           str(row["Deudor_SAP_OK"]),
-          round(float(row["Valor_Faltante_Num"]), 2),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
+      # Si la combinación SAP + Fecha ya NO está en el anexo de hoy, se considera saldado
       if key not in identificadores_anexo_hoy:
         saldados_list.append(row)
 
