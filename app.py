@@ -199,7 +199,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ---
+# --- CARGAR ANEXO EXCEL (CORREGIDO PARA LEER CÓDIGO CLIENTE Y NOMBRE) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -233,19 +233,28 @@ def cargar_anexo_excel(file_obj):
     df = df.loc[:, df.columns.notna()].copy()
     df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
+    # CORRECCIÓN CLAVE: Buscar Código Cliente para el SAP real numérico
     col_trans_code = next(
         (
             c
             for c in df.columns
-            if "DEUDOR SAP" in c or "CODIGO" in c or "SAP" in c
+            if "CODIGO CLIENTE" in c
+            or "CODIGO" in c
+            or ("SAP" in c and "DEUDOR" not in c)
         ),
         None,
     )
+    if not col_trans_code:
+      col_trans_code = next((c for c in df.columns if "SAP" in c), None)
+
     col_trans_name = next(
         (
             c
             for c in df.columns
-            if ("RESPONSABLE" in c or "TITULAR" in c) and "ZONA RV" not in c
+            if "NOMBRE DEL RESPONSABLE" in c
+            or "RESPONSABLE" in c
+            or "TITULAR" in c
+            or "DEUDOR SAP" in c
         ),
         None,
     )
