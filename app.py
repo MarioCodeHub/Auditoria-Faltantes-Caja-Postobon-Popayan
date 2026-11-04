@@ -63,12 +63,13 @@ def convertir_a_fecha(val):
       return pd.to_datetime(val, unit="D", origin="1899-12-30")
     except:
       return pd.NaT
-  if isinstance(val, str):
-    dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
-    if pd.isna(dt):
-      dt = pd.to_datetime(val, errors="coerce")
-    return dt
-  return pd.to_datetime(val, errors="coerce")
+  val_str = str(val).strip()
+  if not val_str or val_str.lower() in ["none", "nan", "-"]:
+    return pd.NaT
+  dt = pd.to_datetime(val_str, dayfirst=True, errors="coerce")
+  if pd.isna(dt):
+    dt = pd.to_datetime(val_str, errors="coerce")
+  return dt
 
 
 def formatear_fecha_ui(val_dt):
@@ -197,8 +198,7 @@ def cargar_historico_csv(file_obj):
     )
 
     return df[
-        (df["Saldo_Num"] > 0)
-        & (df["Deudor_SAP_OK"] != "")
+        (df["Deudor_SAP_OK"] != "")
         & (df["Fecha_DT"].notna())
         & (df["Fecha_DT"].dt.year >= 2026)
     ].copy()
@@ -308,11 +308,8 @@ def cargar_anexo_excel(file_obj):
       else:
         val_sal = max(0.0, val_imp - val_abo)
 
-      if val_imp <= 0:
-        if val_sal > 0 or val_abo > 0:
-          val_imp = val_sal + val_abo
-        else:
-          continue
+      if val_imp <= 0 and val_sal <= 0 and val_abo <= 0:
+        continue
 
       c_code = (
           normalizar_sap(row[col_trans_code])
@@ -350,7 +347,7 @@ def cargar_anexo_excel(file_obj):
       nombres_finales.append(nombre_ok)
       saps_finales.append(c_code)
       mot_finales.append(motivo)
-      importes_finales.append(val_imp)
+      importes_finales.append(val_imp if val_imp > 0 else val_sal + val_abo)
       abonos_finales.append(val_abo)
       saldos_finales.append(val_sal)
       fechas_finales.append(f_val)
@@ -365,7 +362,8 @@ def cargar_anexo_excel(file_obj):
     res_df["Fecha_UI"] = [formatear_fecha_ui(d) for d in res_df["Fecha_DT"]]
     res_df["Motivo_OK"] = mot_finales
 
-    return res_df[res_df["Valor_Faltante_Num"] > 0].copy()
+    # Corrección clave: Mantener todas las filas que tengan fecha válida (incluyendo saldos en 0)
+    return res_df[res_df["Fecha_DT"].notna()].copy()
   except Exception as e:
     st.error(f"Error leyendo el anexo: {e}")
     return pd.DataFrame()
@@ -407,29 +405,27 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-11-03")
   )
 
-  # 1. NUEVOS FALTANTES
+  # 1. NUEVOS FALTANTES: Fecha del anexo == día actual y saldo pendiente
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
-  nuevos = df_anexo[es_dia_actual].copy()
+  nuevos = df_anexo[es_dia_actual & (df_anexo["Saldo_Num"] > 0.01)].copy()
 
   anteriores_anexo = df_anexo[~es_dia_actual].copy()
 
-  # 2. PENDIENTES ACTIVOS
+  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # 3. FALTANTES SALDADOS / PAGADOS
+  # 3. FALTANTES SALDADOS / PAGADOS: Días anteriores con saldo <= 0 en el anexo
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
-
     claves_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
             df_anexo["Fecha_DT"].dt.date,
         )
     )
-
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
       key = (
@@ -438,7 +434,6 @@ def procesar_archivos(file_hist, file_anexo):
       )
       if key not in claves_anexo_hoy:
         saldados_list.append(row)
-
     if saldados_list:
       saldados_historicos = pd.DataFrame(saldados_list)
 
