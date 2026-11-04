@@ -83,7 +83,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (CORREGIDO PARA CAPTURAR NOMBRE REAL Y SAP) ---
+# --- CARGAR HISTÓRICO CSV ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -113,8 +113,6 @@ def cargar_historico_csv(file_obj):
     header_row = rows[header_idx]
     data_rows = rows[header_idx + 1 :]
 
-    # Índices estándar basados en tu CSV maestro:
-    # 3: Fecha, 4: Importe, 5: Duedor SAP, 6: Titular Zona, 8: Motivo
     col_fecha_i, col_valor_i, col_sap_i, col_titular_i, col_motivo_i = (
         3,
         4,
@@ -178,7 +176,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (DINÁMICO) ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -338,7 +336,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO ---
+# --- MOTOR DE AUDITORÍA POPAYÁN CON FILTRO DE TEMPORALIDAD ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -383,8 +381,15 @@ def procesar_archivos(file_hist, file_anexo):
 
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
-    pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
-    
+    # FILTRO CLAVE: Solo evaluamos histórico de los últimos 90 días respecto a hoy
+    # para evitar arrastrar registros viejos e innecesarios de meses pasados (como enero).
+    diferencia_dias = (fecha_dia_actual - df_hist["Fecha_DT"]).dt.days
+    pendientes_hist = df_hist[
+        (df_hist["Saldo_Num"] > 0)
+        & (diferencia_dias >= 0)
+        & (diferencia_dias <= 90)
+    ].copy()
+
     identificadores_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
