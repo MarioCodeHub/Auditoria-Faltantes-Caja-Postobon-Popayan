@@ -83,7 +83,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (CON CAPTURA EXACTA DEL DEUDOR) ---
+# --- CARGAR HISTÓRICO CSV (LECTURA EXACTA DE TITULAR ZONA) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -105,7 +105,6 @@ def cargar_historico_csv(file_obj):
           "VALOR" in row_str
           or "IMPORTE" in row_str
           or "SALDO" in row_str
-          or "DUEDOR" in row_str
           or "TITULAR" in row_str
       ):
         header_idx = idx
@@ -134,25 +133,19 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
+    # Búsqueda estricta en Titular Zona / Responsable
     col_nombre = next(
         (
             c
             for c in df.columns
-            if any(
-                k in c
-                for k in [
-                    "TITULAR",
-                    "RESPONSABLE",
-                    "NOMBRE",
-                    "ZONA",
-                    "CLIENTE",
-                ]
-            )
-            and "ZONA RV" not in c
-            and "SAP" not in c
+            if "TITULAR ZONA" in c
+            or "TITULAR" in c
+            or "RESPONSABLE" in c
+            or "NOMBRE" in c
         ),
         None,
     )
+
     col_fecha = next((c for c in df.columns if "FECHA" in c), None)
     col_valor = next(
         (
@@ -172,14 +165,19 @@ def cargar_historico_csv(file_obj):
         else "1"
     )
 
-    def limpiar_nombre_hist(val):
+    def limpiar_nombre_titular(val):
       txt = remover_tildes_y_raros(val)
-      if not txt or txt in PALABRAS_PROHIBIDAS or txt.isdigit() or len(txt) <= 1:
+      if (
+          not txt
+          or txt in PALABRAS_PROHIBIDAS
+          or txt.isdigit()
+          or "POSTOBON" in txt
+      ):
         return "RESPONSABLE / ZONA"
       return txt
 
     df["Nombre_Deudor_OK"] = (
-        df[col_nombre].apply(limpiar_nombre_hist)
+        df[col_nombre].apply(limpiar_nombre_titular)
         if col_nombre and col_nombre in df.columns
         else "RESPONSABLE / ZONA"
     )
@@ -267,7 +265,9 @@ def cargar_anexo_excel(file_obj):
         (
             c
             for c in df.columns
-            if ("RESPONSABLE" in c or "TITULAR" in c) and "ZONA RV" not in c
+            if "NOMBRE DEL RESPONSABLE" in c
+            or "RESPONSABLE" in c
+            or "TITULAR" in c
         ),
         None,
     )
@@ -433,8 +433,9 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # CRUCE ESTRICTO POR SAP + FECHA (Evita falsos positivos como el de $960k)
-    identificadores_anexo_hoy = set(
+    # RECOPILAMOS TODOS LOS REGISTROS QUE SIGUEN VIVOS HOY EN EL ANEXO (POR SAP + FECHA)
+    # Esto blinda al 100% para que el de $960k y cualquier otro activo NUNCA vayan a saldados.
+    claves_activas_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
             df_anexo["Fecha_DT"].dt.date,
@@ -447,8 +448,8 @@ def procesar_archivos(file_hist, file_anexo):
           str(row["Deudor_SAP_OK"]),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
-      # Si la combinación SAP + Fecha ya NO está en el anexo de hoy, se considera saldado
-      if key not in identificadores_anexo_hoy:
+      # Si ya NO está en el anexo de hoy, se marca como saldado
+      if key not in claves_activas_hoy:
         saldados_list.append(row)
 
     if saldados_list:
