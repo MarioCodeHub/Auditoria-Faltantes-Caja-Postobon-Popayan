@@ -199,7 +199,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (CORREGIDO PARA LEER CÓDIGO CLIENTE Y NOMBRE) ---
+# --- CARGAR ANEXO EXCEL (RESPETANDO EL SALDO REAL DEL REPORTE) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -233,7 +233,6 @@ def cargar_anexo_excel(file_obj):
     df = df.loc[:, df.columns.notna()].copy()
     df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
-    # CORRECCIÓN CLAVE: Buscar Código Cliente para el SAP real numérico
     col_trans_code = next(
         (
             c
@@ -296,20 +295,18 @@ def cargar_anexo_excel(file_obj):
           if col_abono and col_abono in row.index
           else 0.0
       )
-      val_sal = (
-          limpiar_monto(row[col_saldo])
-          if col_saldo and col_saldo in row.index
-          else 0.0
-      )
+
+      # CORRECCIÓN: Tomar el saldo exacto del Excel sin forzar recálculos destructivos
+      if col_saldo and col_saldo in row.index and pd.notna(row[col_saldo]):
+        val_sal = limpiar_monto(row[col_saldo])
+      else:
+        val_sal = max(0.0, val_imp - val_abo)
 
       if val_imp <= 0:
         if val_sal > 0 or val_abo > 0:
           val_imp = val_sal + val_abo
         else:
           continue
-
-      if val_sal <= 0 and val_imp > val_abo:
-        val_sal = max(0.0, val_imp - val_abo)
 
       c_code = (
           normalizar_sap(row[col_trans_code])
