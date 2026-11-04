@@ -1,4 +1,5 @@
 import csv
+import datetime
 import io
 import re
 import unicodedata
@@ -55,13 +56,19 @@ def limpiar_monto(val):
 def convertir_a_fecha(val):
   if pd.isna(val):
     return pd.NaT
+  if isinstance(val, (datetime.datetime, datetime.date, pd.Timestamp)):
+    return pd.to_datetime(val)
   if isinstance(val, (int, float)):
     try:
       return pd.to_datetime(val, unit="D", origin="1899-12-30")
     except:
       return pd.NaT
-  dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
-  return dt
+  if isinstance(val, str):
+    dt = pd.to_datetime(val, dayfirst=True, errors="coerce")
+    if pd.isna(dt):
+      dt = pd.to_datetime(val, errors="coerce")
+    return dt
+  return pd.to_datetime(val, errors="coerce")
 
 
 def formatear_fecha_ui(val_dt):
@@ -199,7 +206,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (RESPETANDO EL SALDO REAL DEL REPORTE) ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -296,7 +303,6 @@ def cargar_anexo_excel(file_obj):
           else 0.0
       )
 
-      # CORRECCIÓN: Tomar el saldo exacto del Excel sin forzar recálculos destructivos
       if col_saldo and col_saldo in row.index and pd.notna(row[col_saldo]):
         val_sal = limpiar_monto(row[col_saldo])
       else:
