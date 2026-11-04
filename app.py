@@ -106,7 +106,7 @@ def limpiar_nombre_deudor(val):
   return txt
 
 
-# --- CARGAR HISTÓRICO CSV (CON EXTRACCIÓN MEJORADA DE NOMBRES) ---
+# --- CARGAR HISTÓRICO CSV (CON LECTURA BLINDADA DE NOMBRES) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -129,6 +129,7 @@ def cargar_historico_csv(file_obj):
           or "IMPORTE" in row_str
           or "SALDO" in row_str
           or "DUEDOR" in row_str
+          or "TITULAR" in row_str
       ):
         header_idx = idx
         break
@@ -186,17 +187,21 @@ def cargar_historico_csv(file_obj):
         else "1"
     )
 
-    # Extraer nombre exacto de Titular Zona / Responsable (columna G / índice 6)
+    # Captura robusta: busca por nombre de columna o usa directamente el índice G (6) del Titular Zona
     nombres_csv = []
-    for idx, row in df.iterrows():
+    for _, row in df.iterrows():
       txt = ""
       if col_nombre and col_nombre in df.columns and pd.notna(row[col_nombre]):
         txt = str(row[col_nombre])
       elif len(row) > 6 and pd.notna(row.iloc[6]):
         txt = str(row.iloc[6])
-      nombres_csv.append(limpiar_nombre_deudor(txt))
+      cleaned = limpiar_nombre_deudor(txt)
+      nombres_csv.append(cleaned if cleaned != "RESPONSABLE / ZONA" else txt)
 
-    df["Nombre_Deudor_OK"] = nombres_csv
+    df["Nombre_Deudor_OK"] = [
+        remover_tildes_y_raros(n) if n else "RESPONSABLE / ZONA"
+        for n in nombres_csv
+    ]
 
     df["Valor_Faltante_Num"] = (
         df[col_valor].apply(limpiar_monto)
@@ -235,7 +240,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (CON BÚSQUEDA EXACTA DE NOMBRES) ---
+# --- CARGAR ANEXO EXCEL ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -401,7 +406,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO (LÓGICA ORIGINAL EXACTA) ---
+# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
