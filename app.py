@@ -201,7 +201,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL (DINÁMICO CON AUTOCALCULO DE SALDO) ---
+# --- CARGAR ANEXO EXCEL (POPAYÁN CON CAPTURA CORRECTA DE RESPONSABLE) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -243,17 +243,20 @@ def cargar_anexo_excel(file_obj):
         ),
         None,
     )
+    # Búsqueda estricta para evitar agarrar "ZONA RV/TRANSPORTADORA"
     col_trans_name = next(
         (
             c
             for c in df.columns
-            if "RESPONSABLE" in c or "TITULAR" in c or "ZONA" in c
+            if ("RESPONSABLE" in c or "TITULAR" in c) and "ZONA RV" not in c
         ),
         None,
     )
-    col_client_name = next(
-        (c for c in df.columns if "OBSERVAC" in c or "MOTIVO" in c), None
-    )
+    if not col_trans_name:
+      col_trans_name = next(
+          (c for c in df.columns if "ZONA" in c and "ZONA RV" not in c), None
+      )
+
     col_fecha = next(
         (c for c in df.columns if "FECHA EN QUE GENERA" in c or "FECHA" in c),
         None,
@@ -299,7 +302,7 @@ def cargar_anexo_excel(file_obj):
         else:
           continue
 
-      # AUTOCALCULO DE SALDO SI VIENE EN CERO/VACÍO EN EL EXCEL
+      # Autocálculo de saldo si viene vacío
       if val_sal <= 0 and val_imp > val_abo:
         val_sal = max(0.0, val_imp - val_abo)
 
@@ -396,7 +399,7 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-10-31")
   )
 
-  # 1. NUEVOS FALTANTES: Registros cuya fecha es el día actual exacto
+  # 1. NUEVOS FALTANTES: Registros del día actual exacto
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
 
@@ -414,25 +417,29 @@ def procesar_archivos(file_hist, file_anexo):
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
-    montos_presentes_hoy = set(df_anexo["Valor_Faltante_Num"].round(2)).union(
-        set(df_anexo["Saldo_Num"].round(2))
+    
+    # Creamos un identificador único por cada registro del anexo actual para verificar existencia exacta sin perder repetidos de igual monto
+    identificadores_anexo_hoy = set(
+        zip(
+            df_anexo["Deudor_SAP_OK"].astype(str),
+            df_anexo["Valor_Faltante_Num"].round(2),
+            df_anexo["Fecha_DT"].dt.date,
+        )
     )
 
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
-      monto_hist = round(float(row["Valor_Faltante_Num"]), 2)
-      saldo_hist = round(float(row["Saldo_Num"]), 2)
+      key = (
+          str(row["Deudor_SAP_OK"]),
+          round(float(row["Valor_Faltante_Num"]), 2),
+          row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
+      )
       # Si el registro pendiente del histórico ya no está en el anexo de hoy, fue saldado
-      if (
-          monto_hist not in montos_presentes_hoy
-          and saldo_hist not in montos_presentes_hoy
-      ):
+      if key not in identificadores_anexo_hoy:
         saldados_list.append(row)
 
     if saldados_list:
-      saldados_historicos = pd.DataFrame(saldados_list).drop_duplicates(
-          subset=["Deudor_SAP_OK", "Valor_Faltante_Num"]
-      )
+      saldados_historicos = pd.DataFrame(saldados_list)
 
   # Unimos los saldados del anexo y los saldados por desaparición del histórico
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
