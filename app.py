@@ -83,7 +83,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (SOLO PENDIENTES ACTIVOS Y NOMBRES REALES) ---
+# --- CARGAR HISTÓRICO CSV (CON DETECCIÓN DE NOMBRE REAL DEL DEUDOR) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -102,99 +102,117 @@ def cargar_historico_csv(file_obj):
     for idx, r in enumerate(rows):
       row_str = " ".join([str(c).upper() for c in r])
       if (
-          "IMPORTE" in row_str
-          or "VALOR" in row_str
-          or "TITULAR" in row_str
-          or "FECHA" in row_str
+          "VALOR" in row_str
+          or "IMPORTE" in row_str
+          or "SALDO" in row_str
+          or "DUEDOR" in row_str
       ):
         header_idx = idx
         break
 
-    header_row = [str(c).upper().strip() for c in rows[header_idx]]
+    headers = [
+        str(c).upper().replace("\n", " ").strip() for c in rows[header_idx]
+    ]
     data_rows = rows[header_idx + 1 :]
 
-    col_fecha = next((i for i, h in enumerate(header_row) if "FECHA" in h), 3)
-    col_valor = next(
-        (
-            i
-            for i, h in enumerate(header_row)
-            if "IMPORTE" in h or ("VALOR" in h and "SALDO" not in h)
-        ),
-        4,
-    )
+    if len(data_rows) > 5000:
+      data_rows = data_rows[-5000:]
+
+    df = pd.DataFrame(data_rows)
+    if len(headers) < len(df.columns):
+      headers += [f"COL_{i}" for i in range(len(headers), len(df.columns))]
+    df.columns = headers[: len(df.columns)]
+    df = df.loc[:, df.columns.notna()].copy()
+    df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
+
     col_sap = next(
         (
-            i
-            for i, h in enumerate(header_row)
-            if "SAP" in h or "DUEDOR" in h or "DEUDOR" in h
+            c
+            for c in df.columns
+            if "DUEDOR SAP" in c or "DEUDOR SAP" in c or "SAP" in c
         ),
-        5,
+        None,
     )
-    col_titular = next(
+    col_nombre = next(
         (
-            i
-            for i, h in enumerate(header_row)
-            if "TITULAR" in h
-            or "RESPONSABLE" in h
-            or ("ZONA" in h and "ZONA RV" not in h)
+            c
+            for c in df.columns
+            if ("TITULAR" in c or "RESPONSABLE" in c or "NOMBRE" in c)
+            and "ZONA RV" not in c
         ),
-        6,
+        None,
     )
-    col_saldo = next(
-        (i for i, h in enumerate(header_row) if "SALDO" in h), -1
+    if not col_nombre:
+      col_nombre = next(
+          (c for c in df.columns if "ZONA" in c and "ZONA RV" not in c), None
+      )
+
+    col_fecha = next((c for c in df.columns if "FECHA" in c), None)
+    col_valor = next(
+        (
+            c
+            for c in df.columns
+            if "IMPORTE" in c or ("VALOR" in c and "SALDO" not in c)
+        ),
+        None,
     )
-    col_motivo = next((i for i, h in enumerate(header_row) if "MOTIVO" in h), 8)
+    col_abono = next((c for c in df.columns if "ABONO" in c), None)
+    col_saldo = next((c for c in df.columns if "SALDO" in c), None)
+    col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
-    parsed_rows = []
-    for r in data_rows:
-      if len(r) <= max(col_fecha, col_valor, col_sap, col_titular):
-        continue
+    df["Deudor_SAP_OK"] = (
+        df[col_sap].apply(normalizar_sap)
+        if col_sap and col_sap in df.columns
+        else "1"
+    )
+    df["Nombre_Deudor_OK"] = (
+        df[col_nombre].apply(remover_tildes_y_raros)
+        if col_nombre and col_nombre in df.columns
+        else "RESPONSABLE / ZONA"
+    )
 
-      f_dt = convertir_a_fecha(r[col_fecha] if col_fecha < len(r) else "")
-      v_num = limpiar_monto(r[col_valor] if col_valor < len(r) else "")
-      s_code = normalizar_sap(r[col_sap] if col_sap < len(r) else "")
-      t_name = remover_tildes_y_raros(
-          r[col_titular] if col_titular < len(r) else ""
-      )
+    # Reemplazo de palabras prohibidas o genéricas
+    df["Nombre_Deudor_OK"] = df["Nombre_Deudor_OK"].apply(
+        lambda x: (
+            "RESPONSABLE / ZONA"
+            if not x or x in PALABRAS_PROHIBIDAS or x.isdigit()
+            else x
+        )
+    )
 
-      s_num = (
-          limpiar_monto(r[col_saldo])
-          if col_saldo != -1 and col_saldo < len(r)
-          else v_num
-      )
-      if s_num <= 0:
-        s_num = v_num
+    df["Valor_Faltante_Num"] = (
+        df[col_valor].apply(limpiar_monto)
+        if col_valor and col_valor in df.columns
+        else 0.0
+    )
+    df["Abonos_Num"] = (
+        df[col_abono].apply(limpiar_monto)
+        if col_abono and col_abono in df.columns
+        else 0.0
+    )
+    df["Saldo_Num"] = (
+        df[col_saldo].apply(limpiar_monto)
+        if col_saldo and col_saldo in df.columns
+        else (df["Valor_Faltante_Num"] - df["Abonos_Num"])
+    )
+    df["Fecha_DT"] = (
+        df[col_fecha].apply(convertir_a_fecha)
+        if col_fecha and col_fecha in df.columns
+        else pd.NaT
+    )
+    df["Fecha_UI"] = df["Fecha_DT"].apply(formatear_fecha_ui)
+    df["Motivo_OK"] = (
+        df[col_motivo].astype(str).str.strip()
+        if col_motivo and col_motivo in df.columns
+        else ""
+    )
 
-      motivo = (
-          str(r[col_motivo]).strip()
-          if col_motivo != -1
-          and col_motivo < len(r)
-          and pd.notna(r[col_motivo])
-          else ""
-      )
-
-      if (
-          not t_name
-          or t_name in PALABRAS_PROHIBIDAS
-          or t_name == "POSTOBON POPAYAN"
-          or t_name.isdigit()
-      ):
-        t_name = "RESPONSABLE / ZONA"
-
-      # FILTRO ESTRICTO: Solo pendientes con saldo > 0 y año actual >= 2026
-      if v_num > 0 and s_num > 0 and pd.notna(f_dt) and f_dt.year >= 2026:
-        parsed_rows.append({
-            "Nombre_Deudor_OK": t_name,
-            "Deudor_SAP_OK": s_code,
-            "Valor_Faltante_Num": v_num,
-            "Abonos_Num": 0.0,
-            "Saldo_Num": s_num,
-            "Fecha_DT": f_dt,
-            "Fecha_UI": formatear_fecha_ui(f_dt),
-            "Motivo_OK": motivo,
-        })
-
-    return pd.DataFrame(parsed_rows)
+    return df[
+        (df["Saldo_Num"] > 0)
+        & (df["Deudor_SAP_OK"] != "")
+        & (df["Fecha_DT"].notna())
+        & (df["Fecha_DT"].dt.year >= 2026)
+    ].copy()
   except Exception as e:
     return pd.DataFrame()
 
@@ -395,15 +413,22 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-10-31")
   )
 
+  # 1. NUEVOS FALTANTES
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
 
   anteriores_anexo = df_anexo[~es_dia_actual].copy()
+
+  # 2. PENDIENTES ACTIVOS
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
+
+  # 3. FALTANTES SALDADOS / PAGADOS
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
+    pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
+
     identificadores_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
@@ -413,7 +438,7 @@ def procesar_archivos(file_hist, file_anexo):
     )
 
     saldados_list = []
-    for _, row in df_hist.iterrows():
+    for _, row in pendientes_hist.iterrows():
       key = (
           str(row["Deudor_SAP_OK"]),
           round(float(row["Valor_Faltante_Num"]), 2),
@@ -426,6 +451,8 @@ def procesar_archivos(file_hist, file_anexo):
       saldados_historicos = pd.DataFrame(saldados_list)
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
+
+  # 4. OMITIDOS EN ANEXO
   omitidos = pd.DataFrame(columns=df_anexo.columns)
 
   def preparar_df_ui(df_in):
@@ -463,8 +490,12 @@ def procesar_archivos(file_hist, file_anexo):
   df_omitidos_ui = preparar_df_ui(omitidos)
 
   tot_nuevos = nuevos["Valor_Faltante_Num"].sum() if not nuevos.empty else 0
-  tot_saldados = saldados["Valor_Faltante_Num"].sum() if not saldados.empty else 0
-  tot_pendientes = pendientes["Saldo_Num"].sum() if not pendientes.empty else 0
+  tot_saldados = (
+      saldados["Valor_Faltante_Num"].sum() if not saldados.empty else 0
+  )
+  tot_pendientes = (
+      pendientes["Saldo_Num"].sum() if not pendientes.empty else 0
+  )
   tot_omitidos = 0
 
   m_str = f"## 🥤 **AUDITORÍA DE FALTANTES - POPAYÁN**\n\n"
@@ -524,9 +555,7 @@ def procesar_archivos(file_hist, file_anexo):
 
 
 # --- INTERFAZ EN STREAMLIT ---
-st.markdown(
-    "# 🥤 **POSTOBÓN POPAYÁN - SISTEMA DE AUDITORÍA DE FALTANTES**"
-)
+st.markdown("# 🥤 **POSTOBÓN POPAYÁN - SISTEMA DE AUDITORÍA DE FALTANTES**")
 
 col1, col2 = st.columns([1, 1])
 
