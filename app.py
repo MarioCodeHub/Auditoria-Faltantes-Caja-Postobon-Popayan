@@ -1,4 +1,5 @@
 import csv
+import io
 import re
 import unicodedata
 import warnings
@@ -83,23 +84,27 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-# --- CARGAR HISTÓRICO CSV (DINÁMICO Y CON DETECCIÓN DE TITULAR ZONA) ---
-def cargar_historico_csv(file_obj):
+# --- CARGAR HISTÓRICO CSV (CON LECTURA EXACTA DE TITULAR ZONA) ---
+def cargar_historico_csv(file_obj, fecha_referencia):
   if file_obj is None:
     return pd.DataFrame()
   try:
+    file_obj.seek(0)
     content = file_obj.getvalue().decode("latin1", errors="ignore")
     lines = content.splitlines()
     rows = []
-    
+
     dialect = None
     try:
       sample = "\n".join(lines[:10])
       dialect = csv.Sniffer().sniff(sample, delimiters=";,\\t|")
     except:
       pass
-    
-    delimiter = dialect.delimiter if dialect else ";"
+
+    delimiter = dialect.dialect if hasattr(dialect, "dialect") else ";"
+    if hasattr(dialect, "delimiter"):
+      delimiter = dialect.delimiter
+
     reader = csv.reader(lines, delimiter=delimiter)
     for r in reader:
       if any(str(cell).strip() for cell in r):
@@ -121,7 +126,9 @@ def cargar_historico_csv(file_obj):
         header_idx = idx
         break
 
-    header_row = [str(c).upper().replace("\n", " ").strip() for c in rows[header_idx]]
+    header_row = [
+        str(c).upper().replace("\n", " ").strip() for c in rows[header_idx]
+    ]
     data_rows = rows[header_idx + 1 :]
 
     df = pd.DataFrame(data_rows)
@@ -139,6 +146,7 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
+    # Búsqueda estricta de Titular Zona (Columna G / Índice 6)
     col_nombre = next(
         (
             c
@@ -150,6 +158,7 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
+
     col_fecha = next((c for c in df.columns if "FECHA" in c), None)
     col_valor = next(
         (
@@ -167,7 +176,7 @@ def cargar_historico_csv(file_obj):
     importes_finales, abonos_finales, saldos_finales = [], [], []
     fechas_finales = []
 
-    for _, row in df.iterrows():
+    for idx_row, row in df.iterrows():
       val_imp = (
           limpiar_monto(row[col_valor])
           if col_valor and col_valor in row.index
@@ -198,25 +207,34 @@ def cargar_historico_csv(file_obj):
           else ""
       )
 
+      # Obtener nombre de la columna detectada o fallback directo a la columna 6 (Titular Zona)
+      nombre_txt = ""
       if (
           col_nombre
           and col_nombre in row.index
           and pd.notna(row[col_nombre])
       ):
-        txt = remover_tildes_y_raros(row[col_nombre])
-        nombre_ok = (
-            txt
-            if txt and txt not in PALABRAS_PROHIBIDAS and not txt.isdigit() and "POSTOBON" not in txt
-            else "RESPONSABLE / ZONA"
-        )
-      else:
+        nombre_txt = str(row[col_nombre])
+      elif len(row) > 6 and pd.notna(row.iloc[6]):
+        nombre_txt = str(row.iloc[6])
+
+      txt = remover_tildes_y_raros(nombre_txt)
+      if (
+          not txt
+          or txt in PALABRAS_PROHIBIDAS
+          or txt.isdigit()
+          or "POSTOBON" in txt
+      ):
         nombre_ok = "RESPONSABLE / ZONA"
+      else:
+        nombre_ok = txt
 
       f_val = (
           row[col_fecha]
           if col_fecha and col_fecha in row.index
           else pd.NaT
       )
+      f_dt = convertir_a_fecha(f_val)
 
       nombres_finales.append(nombre_ok)
       saps_finales.append(c_code)
@@ -224,7 +242,7 @@ def cargar_historico_csv(file_obj):
       importes_finales.append(val_imp)
       abonos_finales.append(val_abo)
       saldos_finales.append(val_sal if val_sal > 0 else val_imp)
-      fechas_finales.append(f_val)
+      fechas_finales.append(f_dt)
 
     res_df = pd.DataFrame()
     res_df["Nombre_Deudor_OK"] = nombres_finales
@@ -232,16 +250,22 @@ def cargar_historico_csv(file_obj):
     res_df["Valor_Faltante_Num"] = importes_finales
     res_df["Abonos_Num"] = abonos_finales
     res_df["Saldo_Num"] = saldos_finales
-    res_df["Fecha_DT"] = [convertir_a_fecha(f) for f in fechas_finales]
+    res_df["Fecha_DT"] = fechas_finales
     res_df["Fecha_UI"] = [formatear_fecha_ui(d) for d in res_df["Fecha_DT"]]
     res_df["Motivo_OK"] = mot_finales
 
-    return res_df[
-        (res_df["Saldo_Num"] > 0)
-        & (res_df["Deudor_SAP_OK"] != "")
-        & (res_df["Fecha_DT"].notna())
-        & (res_df["Fecha_DT"].dt.year >= 2026)
-    ].copy()
+    # FILTRO ESTRICTO: Solo registros con saldo > 0 y máximo de 45 días de antigüedad respecto a hoy
+    if pd.notna(fecha_referencia) and not res_df.empty:
+      diferencia_dias = (fecha_referencia - res_df["Fecha_DT"]).dt.days
+      res_df = res_df[
+          (res_df["Saldo_Num"] > 0)
+          & (res_df["Deudor_SAP_OK"] != "")
+          & (res_df["Fecha_DT"].notna())
+          & (diferencia_dias >= 0)
+          & (diferencia_dias <= 45)
+      ].copy()
+
+    return res_df
   except Exception as e:
     return pd.DataFrame()
 
@@ -422,9 +446,6 @@ def procesar_archivos(file_hist, file_anexo):
     )
 
   df_anexo = cargar_anexo_excel(file_anexo)
-  df_hist = (
-      cargar_historico_csv(file_hist) if file_hist is not None else pd.DataFrame()
-  )
 
   if df_anexo.empty:
     return (
@@ -444,6 +465,12 @@ def procesar_archivos(file_hist, file_anexo):
       else pd.Timestamp("2026-10-31")
   )
 
+  df_hist = (
+      cargar_historico_csv(file_hist, fecha_dia_actual)
+      if file_hist is not None
+      else pd.DataFrame()
+  )
+
   # 1. NUEVOS FALTANTES
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
@@ -460,7 +487,6 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # CRUCE ESTRICTO POR SAP + FECHA (Evita que el de $960k pase a saldados)
     claves_activas_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
@@ -474,7 +500,6 @@ def procesar_archivos(file_hist, file_anexo):
           str(row["Deudor_SAP_OK"]),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
-      # Si la combinación SAP + Fecha ya NO está en el anexo de hoy, se considera saldado
       if key not in claves_activas_hoy:
         saldados_list.append(row)
 
