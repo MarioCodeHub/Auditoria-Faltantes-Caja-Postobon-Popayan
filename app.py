@@ -94,7 +94,7 @@ PALABRAS_PROHIBIDAS = [
 ]
 
 
-def limpiar_nombre_seguro(val):
+def limpiar_nombre_deudor(val):
   txt = remover_tildes_y_raros(val)
   if (
       not txt
@@ -106,23 +106,47 @@ def limpiar_nombre_seguro(val):
   return txt
 
 
-# --- CARGAR HISTÓRICO CSV (CON NOMBRES LIMPIOS DE TITULAR ZONA) ---
+# --- CARGAR HISTÓRICO CSV (CON EXTRACCIÓN MEJORADA DE NOMBRES) ---
 def cargar_historico_csv(file_obj):
   if file_obj is None:
     return pd.DataFrame()
   try:
-    file_obj.seek(0)
-    df = pd.read_csv(
-        io.BytesIO(file_obj.getvalue()),
-        sep=None,
-        engine="python",
-        encoding="latin1",
-        on_bad_lines="skip",
-    )
-    if df.empty:
+    rows = []
+    content = file_obj.getvalue().decode("latin1", errors="ignore")
+    reader = csv.reader(content.splitlines(), delimiter=";")
+    for r in reader:
+      if any(str(cell).strip() for cell in r):
+        rows.append(r)
+
+    if not rows:
       return pd.DataFrame()
 
-    df.columns = [str(c).upper().strip() for c in df.columns]
+    header_idx = 0
+    for idx, r in enumerate(rows):
+      row_str = " ".join([str(c).upper() for c in r])
+      if (
+          "VALOR" in row_str
+          or "IMPORTE" in row_str
+          or "SALDO" in row_str
+          or "DUEDOR" in row_str
+      ):
+        header_idx = idx
+        break
+
+    headers = [
+        str(c).upper().replace("\n", " ").strip() for c in rows[header_idx]
+    ]
+    data_rows = rows[header_idx + 1 :]
+
+    if len(data_rows) > 5000:
+      data_rows = data_rows[-5000:]
+
+    df = pd.DataFrame(data_rows)
+    if len(headers) < len(df.columns):
+      headers += [f"COL_{i}" for i in range(len(headers), len(df.columns))]
+    df.columns = headers[: len(df.columns)]
+    df = df.loc[:, df.columns.notna()].copy()
+    df = df.loc[:, ~df.columns.duplicated(keep="first")].copy()
 
     col_sap = next(
         (
@@ -132,7 +156,6 @@ def cargar_historico_csv(file_obj):
         ),
         None,
     )
-    # Búsqueda estricta en Titular Zona / Responsable (Columna G)
     col_nombre = next(
         (
             c
@@ -163,15 +186,15 @@ def cargar_historico_csv(file_obj):
         else "1"
     )
 
-    # Si no detecta la columna por nombre, toma por defecto la columna G (índice 6)
+    # Extraer nombre exacto de Titular Zona / Responsable (columna G / índice 6)
     nombres_csv = []
     for idx, row in df.iterrows():
-      n_txt = ""
+      txt = ""
       if col_nombre and col_nombre in df.columns and pd.notna(row[col_nombre]):
-        n_txt = str(row[col_nombre])
+        txt = str(row[col_nombre])
       elif len(row) > 6 and pd.notna(row.iloc[6]):
-        n_txt = str(row.iloc[6])
-      nombres_csv.append(limpiar_nombre_seguro(n_txt))
+        txt = str(row.iloc[6])
+      nombres_csv.append(limpiar_nombre_deudor(txt))
 
     df["Nombre_Deudor_OK"] = nombres_csv
 
@@ -212,7 +235,7 @@ def cargar_historico_csv(file_obj):
     return pd.DataFrame()
 
 
-# --- CARGAR ANEXO EXCEL ---
+# --- CARGAR ANEXO EXCEL (CON BÚSQUEDA EXACTA DE NOMBRES) ---
 def cargar_anexo_excel(file_obj):
   if file_obj is None:
     return pd.DataFrame()
@@ -250,23 +273,15 @@ def cargar_anexo_excel(file_obj):
         (
             c
             for c in df.columns
-            if "CODIGO CLIENTE" in c
-            or "CODIGO" in c
-            or ("SAP" in c and "DEUDOR" not in c)
+            if "DEUDOR SAP" in c or "CODIGO" in c or "SAP" in c
         ),
         None,
     )
-    if not col_trans_code:
-      col_trans_code = next((c for c in df.columns if "SAP" in c), None)
-
     col_trans_name = next(
         (
             c
             for c in df.columns
-            if "NOMBRE DEL RESPONSABLE" in c
-            or "RESPONSABLE" in c
-            or "TITULAR" in c
-            or "DEUDOR SAP" in c
+            if ("RESPONSABLE" in c or "TITULAR" in c) and "ZONA RV" not in c
         ),
         None,
     )
@@ -342,7 +357,19 @@ def cargar_anexo_excel(file_obj):
           and col_trans_name in row.index
           and pd.notna(row[col_trans_name])
       ):
-        nombre_ok = limpiar_nombre_seguro(row[col_trans_name])
+        nombre_ok = limpiar_nombre_deudor(row[col_trans_name])
+      else:
+        for c in [
+            "NOMBRE DEL RESPONSABLE",
+            "TITULAR ZONA",
+            "DEUDOR SAP",
+            "ZONA",
+        ]:
+          if c in df.columns and pd.notna(row[c]):
+            test_n = limpiar_nombre_deudor(row[c])
+            if test_n != "RESPONSABLE / ZONA":
+              nombre_ok = test_n
+              break
 
       f_val = (
           row[col_fecha]
@@ -374,7 +401,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN (LÓGICA ORIGINAL RESTAURADA) ---
+# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO (LÓGICA ORIGINAL EXACTA) ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -407,28 +434,29 @@ def procesar_archivos(file_hist, file_anexo):
   fecha_dia_actual = (
       fechas_validas.max()
       if not fechas_validas.empty
-      else pd.Timestamp("2026-11-03")
+      else pd.Timestamp("2026-10-31")
   )
 
-  # 1. NUEVOS FALTANTES
+  # 1. NUEVOS FALTANTES: Registros del día actual exacto
   es_dia_actual = df_anexo["Fecha_DT"].dt.date == fecha_dia_actual.date()
   nuevos = df_anexo[es_dia_actual].copy()
 
   anteriores_anexo = df_anexo[~es_dia_actual].copy()
 
-  # 2. PENDIENTES ACTIVOS
+  # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # 3. FALTANTES SALDADOS / PAGADOS
+  # 3. FALTANTES SALDADOS / PAGADOS:
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
   saldados_historicos = pd.DataFrame()
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    claves_anexo_hoy = set(
+    identificadores_anexo_hoy = set(
         zip(
             df_anexo["Deudor_SAP_OK"].astype(str),
+            df_anexo["Valor_Faltante_Num"].round(2),
             df_anexo["Fecha_DT"].dt.date,
         )
     )
@@ -437,9 +465,10 @@ def procesar_archivos(file_hist, file_anexo):
     for _, row in pendientes_hist.iterrows():
       key = (
           str(row["Deudor_SAP_OK"]),
+          round(float(row["Valor_Faltante_Num"]), 2),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
-      if key not in claves_anexo_hoy:
+      if key not in identificadores_anexo_hoy:
         saldados_list.append(row)
 
     if saldados_list:
