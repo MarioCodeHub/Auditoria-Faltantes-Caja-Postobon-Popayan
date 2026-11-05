@@ -194,11 +194,9 @@ def cargar_historico_csv(file_obj):
         txt = str(row[col_nombre])
       elif len(row) > 6 and pd.notna(row.iloc[6]):
         txt = str(row.iloc[6])
-      cleaned = limpiar_nombre_deudor(txt)
-      nombres_csv.append(cleaned)
+      nombres_csv.append(limpiar_nombre_deudor(txt))
 
     df["Nombre_Deudor_OK"] = nombres_csv
-
     df["Valor_Faltante_Num"] = (
         df[col_valor].apply(limpiar_monto)
         if col_valor and col_valor in df.columns
@@ -219,6 +217,7 @@ def cargar_historico_csv(file_obj):
         if col_fecha and col_fecha in df.columns
         else pd.NaT
     )
+    df["Fecha_Str"] = df["Fecha_DT"].dt.strftime("%Y-%m-%d").fillna("")
     df["Fecha_UI"] = df["Fecha_DT"].apply(formatear_fecha_ui)
     df["Motivo_OK"] = (
         df[col_motivo].astype(str).str.strip()
@@ -393,6 +392,7 @@ def cargar_anexo_excel(file_obj):
     res_df["Abonos_Num"] = abonos_finales
     res_df["Saldo_Num"] = saldos_finales
     res_df["Fecha_DT"] = [convertir_a_fecha(f) for f in fechas_finales]
+    res_df["Fecha_Str"] = res_df["Fecha_DT"].dt.strftime("%Y-%m-%d").fillna("")
     res_df["Fecha_UI"] = [formatear_fecha_ui(d) for d in res_df["Fecha_DT"]]
     res_df["Motivo_OK"] = mot_finales
 
@@ -447,16 +447,15 @@ def procesar_archivos(file_hist, file_anexo):
   # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # Mapeo de nombres válidos desde el anexo actual para rescatar históricos si el CSV viene vacío
-  mapa_nombres_anexo = dict(
-      zip(
-          zip(
-              df_anexo["Deudor_SAP_OK"].astype(str),
-              df_anexo["Fecha_DT"].dt.date,
-          ),
-          df_anexo["Nombre_Deudor_OK"],
-      )
-  )
+  # CREAR DICCIONARIO MAESTRO DE NOMBRES (SAP -> Nombre real) usando tanto anexo como histórico
+  diccionario_nombres = {}
+  for _, r in df_anexo.iterrows():
+    if r["Nombre_Deudor_OK"]:
+      diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
+  if not df_hist.empty:
+    for _, r in df_hist.iterrows():
+      if r["Nombre_Deudor_OK"] and str(r["Deudor_SAP_OK"]) != "1":
+        diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
 
   # 3. FALTANTES SALDADOS / PAGADOS:
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
@@ -465,31 +464,26 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # LLAVE ESTRICTA: SAP + Fecha (si el SAP y la fecha están en el anexo de hoy, NUNCA se va a saldados)
+    # LLAVE ESTRICTA POR TEXTO (SAP + Fecha en formato YYYY-MM-DD para evitar fallos de objetos date)
     claves_anexo_hoy = set(
-        zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_DT"].dt.date)
+        zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"])
     )
 
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
       sap_key = str(row["Deudor_SAP_OK"])
-      f_key = row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None
-      key = (sap_key, f_key)
+      f_str = row["Fecha_Str"]
+      key = (sap_key, f_str)
 
+      # Si NO está presente en el anexo de hoy, está saldado
       if key not in claves_anexo_hoy:
-        # Rescatar nombre si en el histórico venía vacío o genérico
+        # Asignar nombre real desde el diccionario maestro si el histórico venía sin nombre
         if not row["Nombre_Deudor_OK"] or row["Nombre_Deudor_OK"] in [
             "RESPONSABLE / ZONA",
             "POSTOBON POPAYAN",
         ]:
-          # Buscar en el anexo actual o dejar un respaldo limpio
-          row["Nombre_Deudor_OK"] = mapa_nombres_anexo.get(
-              key,
-              (
-                  row["Nombre_Deudor_OK"]
-                  if row["Nombre_Deudor_OK"]
-                  else "RESPONSABLE / ZONA"
-              ),
+          row["Nombre_Deudor_OK"] = diccionario_nombres.get(
+              sap_key, "RESPONSABLE / ZONA"
           )
         saldados_list.append(row)
 
@@ -498,15 +492,20 @@ def procesar_archivos(file_hist, file_anexo):
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
 
-  # Asegurar nombres limpios en todas las tablas finales
+  # Limpieza y asignación final de nombres para garantizar que NINGUNO quede vacío o con nombre genérico
   for df_temp in [nuevos, pendientes, saldados]:
     if not df_temp.empty and "Nombre_Deudor_OK" in df_temp.columns:
-      df_temp["Nombre_Deudor_OK"] = df_temp["Nombre_Deudor_OK"].apply(
-          lambda x: (
-              str(x).upper()
-              if pd.notna(x) and str(x).strip() not in ["", "None", "nan"]
-              else "RESPONSABLE / ZONA"
-          )
+      df_temp["Nombre_Deudor_OK"] = df_temp.apply(
+          lambda r: (
+              r["Nombre_Deudor_OK"]
+              if pd.notna(r["Nombre_Deudor_OK"])
+              and str(r["Nombre_Deudor_OK"]).strip()
+              not in ["", "None", "nan", "POSTOBON POPAYAN"]
+              else diccionario_nombres.get(
+                  str(r["Deudor_SAP_OK"]), "RESPONSABLE / ZONA"
+              )
+          ),
+          axis=1,
       )
 
   omitidos = pd.DataFrame(columns=df_anexo.columns)
