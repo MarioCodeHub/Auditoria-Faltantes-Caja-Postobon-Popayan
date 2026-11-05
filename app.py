@@ -30,11 +30,11 @@ def remover_tildes_y_raros(texto):
 
 def normalizar_sap(val):
   if pd.isna(val):
-    return "1"
+    return ""
   txt = str(val).strip().split(".")[0]
   txt = re.sub(r"\D", "", txt)
-  if txt in ["1", ""] or not txt:
-    return "1"
+  if not txt or txt == "1":
+    return ""
   return txt
 
 
@@ -181,21 +181,29 @@ def cargar_historico_csv(file_obj):
     col_saldo = next((c for c in df.columns if "SALDO" in c), None)
     col_motivo = next((c for c in df.columns if "MOTIVO" in c), None)
 
-    df["Deudor_SAP_OK"] = (
-        df[col_sap].apply(normalizar_sap)
-        if col_sap and col_sap in df.columns
-        else "1"
-    )
-
-    nombres_csv = []
+    saps_csv, nombres_csv = [], []
     for _, row in df.iterrows():
-      txt = ""
-      if col_nombre and col_nombre in df.columns and pd.notna(row[col_nombre]):
-        txt = str(row[col_nombre])
-      elif len(row) > 6 and pd.notna(row.iloc[6]):
-        txt = str(row.iloc[6])
-      nombres_csv.append(limpiar_nombre_deudor(txt))
+      # Búsqueda robusta de SAP en la fila si la columna por nombre falla
+      s_val = ""
+      if col_sap and col_sap in df.columns and pd.notna(row[col_sap]):
+        s_val = normalizar_sap(row[col_sap])
+      if not s_val:
+        for val_cell in row.values:
+          cand = normalizar_sap(val_cell)
+          if len(cand) >= 5:  # Los SAPs de Postobón son largos
+            s_val = cand
+            break
+      saps_csv.append(s_val if s_val else "")
 
+      # Búsqueda robusta de Nombre
+      n_val = ""
+      if col_nombre and col_nombre in df.columns and pd.notna(row[col_nombre]):
+        n_val = limpiar_nombre_deudor(row[col_nombre])
+      if not n_val and len(row) > 6 and pd.notna(row.iloc[6]):
+        n_val = limpiar_nombre_deudor(row.iloc[6])
+      nombres_csv.append(n_val)
+
+    df["Deudor_SAP_OK"] = saps_csv
     df["Nombre_Deudor_OK"] = nombres_csv
     df["Valor_Faltante_Num"] = (
         df[col_valor].apply(limpiar_monto)
@@ -226,8 +234,7 @@ def cargar_historico_csv(file_obj):
     )
 
     return df[
-        (df["Saldo_Num"] > 0)
-        & (df["Deudor_SAP_OK"] != "")
+        (df["Deudor_SAP_OK"] != "")
         & (df["Fecha_DT"].notna())
         & (df["Fecha_DT"].dt.year >= 2026)
     ].copy()
@@ -343,7 +350,7 @@ def cargar_anexo_excel(file_obj):
           if col_trans_code
           and col_trans_code in row.index
           and pd.notna(row[col_trans_code])
-          else "1"
+          else ""
       )
       motivo = (
           str(row[col_motivo]).strip()
@@ -396,7 +403,9 @@ def cargar_anexo_excel(file_obj):
     res_df["Fecha_UI"] = [formatear_fecha_ui(d) for d in res_df["Fecha_DT"]]
     res_df["Motivo_OK"] = mot_finales
 
-    return res_df[res_df["Valor_Faltante_Num"] > 0].copy()
+    return res_df[
+        (res_df["Deudor_SAP_OK"] != "") & (res_df["Valor_Faltante_Num"] > 0)
+    ].copy()
   except Exception as e:
     st.error(f"Error leyendo el anexo: {e}")
     return pd.DataFrame()
@@ -447,14 +456,14 @@ def procesar_archivos(file_hist, file_anexo):
   # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # CREAR DICCIONARIO MAESTRO DE NOMBRES (SAP -> Nombre real) usando tanto anexo como histórico
+  # CREAR DICCIONARIO MAESTRO DE NOMBRES POR SAP (Desde el anexo y el histórico)
   diccionario_nombres = {}
   for _, r in df_anexo.iterrows():
-    if r["Nombre_Deudor_OK"]:
+    if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
       diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
   if not df_hist.empty:
     for _, r in df_hist.iterrows():
-      if r["Nombre_Deudor_OK"] and str(r["Deudor_SAP_OK"]) != "1":
+      if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
         diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
 
   # 3. FALTANTES SALDADOS / PAGADOS:
@@ -464,7 +473,7 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # LLAVE ESTRICTA POR TEXTO (SAP + Fecha en formato YYYY-MM-DD para evitar fallos de objetos date)
+    # LLAVE ESTRICTA POR SAP + Fecha (Si el SAP y la Fecha están en CUALQUIER parte del anexo de hoy, NUNCA se va a saldados)
     claves_anexo_hoy = set(
         zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"])
     )
@@ -475,16 +484,8 @@ def procesar_archivos(file_hist, file_anexo):
       f_str = row["Fecha_Str"]
       key = (sap_key, f_str)
 
-      # Si NO está presente en el anexo de hoy, está saldado
+      # Si la combinación SAP + Fecha NO está en el anexo de hoy, se considera saldada/pagada
       if key not in claves_anexo_hoy:
-        # Asignar nombre real desde el diccionario maestro si el histórico venía sin nombre
-        if not row["Nombre_Deudor_OK"] or row["Nombre_Deudor_OK"] in [
-            "RESPONSABLE / ZONA",
-            "POSTOBON POPAYAN",
-        ]:
-          row["Nombre_Deudor_OK"] = diccionario_nombres.get(
-              sap_key, "RESPONSABLE / ZONA"
-          )
         saldados_list.append(row)
 
     if saldados_list:
@@ -492,21 +493,26 @@ def procesar_archivos(file_hist, file_anexo):
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
 
-  # Limpieza y asignación final de nombres para garantizar que NINGUNO quede vacío o con nombre genérico
+  # ASIGNACIÓN Y RECUPERACIÓN DE NOMBRES Y SAPs PARA QUE NINGUNO QUEDE COMO "RESPONSABLE / ZONA" O "1"
   for df_temp in [nuevos, pendientes, saldados]:
-    if not df_temp.empty and "Nombre_Deudor_OK" in df_temp.columns:
+    if not df_temp.empty:
+      if "Nombre_Deudor_OK" not in df_temp.columns:
+        df_temp["Nombre_Deudor_OK"] = ""
       df_temp["Nombre_Deudor_OK"] = df_temp.apply(
           lambda r: (
               r["Nombre_Deudor_OK"]
               if pd.notna(r["Nombre_Deudor_OK"])
-              and str(r["Nombre_Deudor_OK"]).strip()
-              not in ["", "None", "nan", "POSTOBON POPAYAN"]
+              and str(r["Nombre_Deudor_OK"]).strip() != ""
               else diccionario_nombres.get(
                   str(r["Deudor_SAP_OK"]), "RESPONSABLE / ZONA"
               )
           ),
           axis=1,
       )
+      if "Deudor_SAP_OK" in df_temp.columns:
+        df_temp["Deudor_SAP_OK"] = df_temp["Deudor_SAP_OK"].apply(
+            lambda x: str(x) if pd.notna(x) and str(x).strip() != "" else "1"
+        )
 
   omitidos = pd.DataFrame(columns=df_anexo.columns)
 
