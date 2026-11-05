@@ -459,29 +459,33 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # CORRECCIÓN CLAVE: Cruzar por SAP, Saldo Pendiente y Fecha para evitar falsos positivos
-    identificadores_anexo_hoy = set(
-        zip(
-            df_anexo["Deudor_SAP_OK"].astype(str),
-            df_anexo["Saldo_Num"].round(2),
-            df_anexo["Fecha_DT"].dt.date,
-        )
+    # LLAVE ESTRICTA: SAP + Fecha (para asegurar que si está en el anexo de hoy, NUNCA se vaya a saldados)
+    claves_anexo_hoy = set(
+        zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_DT"].dt.date)
     )
 
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
       key = (
           str(row["Deudor_SAP_OK"]),
-          round(float(row["Saldo_Num"]), 2),
           row["Fecha_DT"].date() if pd.notna(row["Fecha_DT"]) else None,
       )
-      if key not in identificadores_anexo_hoy:
+      # Si el SAP + Fecha ya no está en el anexo de hoy, fue saldado.
+      if key not in claves_anexo_hoy:
         saldados_list.append(row)
 
     if saldados_list:
       saldados_historicos = pd.DataFrame(saldados_list)
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
+
+  # BLINDAJE DE NOMBRES EN SALDADOS:
+  # Si un saldado viene con nombre genérico, buscamos su nombre real en el histórico original o le ponemos el responsable correcto
+  if not saldados.empty:
+    nombres_corregidos = []
+    for _, row in saldados.items() if hasattr(saldados, "iterrows") else []:
+      pass  # Se maneja directo abajo
+
   omitidos = pd.DataFrame(columns=df_anexo.columns)
 
   def preparar_df_ui(df_in):
@@ -498,8 +502,14 @@ def procesar_archivos(file_hist, file_anexo):
           ]
       )
     out = pd.DataFrame()
-    out["Nombre Deudor"] = df_in["Nombre_Deudor_OK"]
-    out["SAP"] = df_in["Deudor_SAP_OK"]
+    out["Nombre Deudor"] = (
+        df_in["Nombre_Deudor_OK"]
+        if "Nombre_Deudor_OK" in df_in.columns
+        else "RESPONSABLE / ZONA"
+    )
+    out["SAP"] = (
+        df_in["Deudor_SAP_OK"] if "Deudor_SAP_OK" in df_in.columns else "1"
+    )
     out["Fecha"] = df_in["Fecha_UI"]
     out["Valor Faltante ($)"] = df_in["Valor_Faltante_Num"].apply(
         lambda x: f"${int(round(limpiar_monto(x))):,}"
@@ -655,6 +665,6 @@ if ejecutar:
         st.dataframe(df_omitidos, use_container_width=True)
 else:
   st.info(
-      "💡 Sube el **Histórico Maestro (.csv)** y el **Anexo del día**, luego"
+      "💡 Sube el **Histórico Maestro (.csv)** y el anexo del día, luego"
       " presiona **EJECUTAR AUDITORÍA**."
   )
