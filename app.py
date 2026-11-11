@@ -33,7 +33,9 @@ def normalizar_sap(val):
     return ""
   txt = str(val).strip().split(".")[0]
   txt = re.sub(r"\D", "", txt)
-  if not txt or txt == "1":
+  # Los SAPs reales de Postobón son largos (generalmente 8 a 10 dígitos).
+  # Evitamos que códigos cortos de zonas o rutas (como 1501 o 1) se pasen como SAPs de deudores.
+  if not txt or len(txt) < 5 or txt == "1":
     return ""
   return txt
 
@@ -183,19 +185,17 @@ def cargar_historico_csv(file_obj):
 
     saps_csv, nombres_csv = [], []
     for _, row in df.iterrows():
-      # Búsqueda robusta de SAP en la fila si la columna por nombre falla
       s_val = ""
       if col_sap and col_sap in df.columns and pd.notna(row[col_sap]):
         s_val = normalizar_sap(row[col_sap])
       if not s_val:
         for val_cell in row.values:
           cand = normalizar_sap(val_cell)
-          if len(cand) >= 5:  # Los SAPs de Postobón son largos
+          if len(cand) >= 5:
             s_val = cand
             break
       saps_csv.append(s_val if s_val else "")
 
-      # Búsqueda robusta de Nombre
       n_val = ""
       if col_nombre and col_nombre in df.columns and pd.notna(row[col_nombre]):
         n_val = limpiar_nombre_deudor(row[col_nombre])
@@ -473,7 +473,7 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # LLAVE ESTRICTA POR SAP + Fecha (Si el SAP y la Fecha están en CUALQUIER parte del anexo de hoy, NUNCA se va a saldados)
+    # LLAVE ESTRICTA POR SAP + Fecha (Si el SAP correcto y la Fecha están en el anexo de hoy, NUNCA se va a saldados)
     claves_anexo_hoy = set(
         zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"])
     )
@@ -484,7 +484,6 @@ def procesar_archivos(file_hist, file_anexo):
       f_str = row["Fecha_Str"]
       key = (sap_key, f_str)
 
-      # Si la combinación SAP + Fecha NO está en el anexo de hoy, se considera saldada/pagada
       if key not in claves_anexo_hoy:
         saldados_list.append(row)
 
@@ -493,7 +492,7 @@ def procesar_archivos(file_hist, file_anexo):
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
 
-  # ASIGNACIÓN Y RECUPERACIÓN DE NOMBRES Y SAPs PARA QUE NINGUNO QUEDE COMO "RESPONSABLE / ZONA" O "1"
+  # ASIGNACIÓN Y RECUPERACIÓN DE NOMBRES Y SAPs CORRECTOS
   for df_temp in [nuevos, pendientes, saldados]:
     if not df_temp.empty:
       if "Nombre_Deudor_OK" not in df_temp.columns:
@@ -511,7 +510,7 @@ def procesar_archivos(file_hist, file_anexo):
       )
       if "Deudor_SAP_OK" in df_temp.columns:
         df_temp["Deudor_SAP_OK"] = df_temp["Deudor_SAP_OK"].apply(
-            lambda x: str(x) if pd.notna(x) and str(x).strip() != "" else "1"
+            lambda x: str(x) if pd.notna(x) and str(x).strip() != "" else ""
         )
 
   omitidos = pd.DataFrame(columns=df_anexo.columns)
@@ -536,7 +535,7 @@ def procesar_archivos(file_hist, file_anexo):
         else "RESPONSABLE / ZONA"
     )
     out["SAP"] = (
-        df_in["Deudor_SAP_OK"] if "Deudor_SAP_OK" in df_in.columns else "1"
+        df_in["Deudor_SAP_OK"] if "Deudor_SAP_OK" in df_in.columns else ""
     )
     out["Fecha"] = df_in["Fecha_UI"]
     out["Valor Faltante ($)"] = df_in["Valor_Faltante_Num"].apply(
