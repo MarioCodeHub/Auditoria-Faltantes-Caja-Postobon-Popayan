@@ -33,8 +33,6 @@ def normalizar_sap(val):
     return ""
   txt = str(val).strip().split(".")[0]
   txt = re.sub(r"\D", "", txt)
-  # Los SAPs reales de Postobón son largos (generalmente 8 a 10 dígitos).
-  # Evitamos que códigos cortos de zonas o rutas (como 1501 o 1) se pasen como SAPs de deudores.
   if not txt or len(txt) < 5 or txt == "1":
     return ""
   return txt
@@ -411,7 +409,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO ---
+# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO (CON QUIEBRE DE MONTO Y SAP) ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -456,7 +454,7 @@ def procesar_archivos(file_hist, file_anexo):
   # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # CREAR DICCIONARIO MAESTRO DE NOMBRES POR SAP (Desde el anexo y el histórico)
+  # CREAR DICCIONARIO MAESTRO DE NOMBRES POR SAP (Rescate garantizado)
   diccionario_nombres = {}
   for _, r in df_anexo.iterrows():
     if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
@@ -473,17 +471,24 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # LLAVE ESTRICTA POR SAP + Fecha (Si el SAP correcto y la Fecha están en el anexo de hoy, NUNCA se va a saldados)
+    # LLAVE DE QUIEBRE EXACTA: SAP + Fecha + Monto del Saldo (Redondeado a 2 decimales)
+    # Esto permite distinguir perfectamente cuando un mismo deudor tiene dos faltantes en la misma fecha por valores distintos (ej: Franklin de 1.5M vs 5M)
     claves_anexo_hoy = set(
-        zip(df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"])
+        zip(
+            df_anexo["Deudor_SAP_OK"].astype(str),
+            df_anexo["Fecha_Str"],
+            df_anexo["Saldo_Num"].round(2),
+        )
     )
 
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
       sap_key = str(row["Deudor_SAP_OK"])
       f_str = row["Fecha_Str"]
-      key = (sap_key, f_str)
+      monto_key = round(float(row["Saldo_Num"]), 2)
+      key = (sap_key, f_str, monto_key)
 
+      # Si esta combinación exacta NO está en el anexo de hoy, significa que fue saldado/pagado
       if key not in claves_anexo_hoy:
         saldados_list.append(row)
 
@@ -633,7 +638,7 @@ with col1:
   )
 
 with col2:
-  st.subheader("Estado del Proceso")
+  st.subheader("Estado_del_Proceso")
   ejecutar = st.button("🚀 EJECUTAR AUDITORÍA", type="primary")
 
 if ejecutar:
