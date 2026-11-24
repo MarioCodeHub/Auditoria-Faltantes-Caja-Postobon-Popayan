@@ -409,7 +409,7 @@ def cargar_anexo_excel(file_obj):
     return pd.DataFrame()
 
 
-# --- MOTOR DE AUDITORÍA POPAYÁN PERFECTO (CON QUIEBRE DE MONTO Y SAP) ---
+# --- MOTOR DE AUDITORÍA POPAYÁN ---
 def procesar_archivos(file_hist, file_anexo):
   if file_anexo is None:
     return (
@@ -442,7 +442,7 @@ def procesar_archivos(file_hist, file_anexo):
   fecha_dia_actual = (
       fechas_validas.max()
       if not fechas_validas.empty
-      else pd.Timestamp("2026-10-31")
+      else pd.Timestamp("2026-11-24")
   )
 
   # 1. NUEVOS FALTANTES: Registros del día actual exacto
@@ -454,15 +454,15 @@ def procesar_archivos(file_hist, file_anexo):
   # 2. PENDIENTES ACTIVOS: Días anteriores con saldo > 0
   pendientes = anteriores_anexo[anteriores_anexo["Saldo_Num"] > 0.01].copy()
 
-  # CREAR DICCIONARIO MAESTRO DE NOMBRES POR SAP (Rescate garantizado)
+  # Diccionario maestro de nombres por SAP (priorizando el anexo y luego el histórico)
   diccionario_nombres = {}
-  for _, r in df_anexo.iterrows():
-    if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
-      diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
   if not df_hist.empty:
     for _, r in df_hist.iterrows():
       if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
         diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
+  for _, r in df_anexo.iterrows():
+    if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
+      diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
 
   # 3. FALTANTES SALDADOS / PAGADOS:
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
@@ -471,25 +471,27 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # LLAVE DE QUIEBRE EXACTA: SAP + Fecha + Monto del Saldo (Redondeado a 2 decimales)
-    # Esto permite distinguir perfectamente cuando un mismo deudor tiene dos faltantes en la misma fecha por valores distintos (ej: Franklin de 1.5M vs 5M)
-    claves_anexo_hoy = set(
-        zip(
-            df_anexo["Deudor_SAP_OK"].astype(str),
-            df_anexo["Fecha_Str"],
-            df_anexo["Saldo_Num"].round(2),
-        )
-    )
+    # Conteo por SAP + Fecha en el anexo de hoy:
+    # Si un faltante tuvo resta/abono (ej. =3763000-3013000 -> 750000), sigue existiendo con ese SAP y Fecha en el anexo.
+    conteo_anexo_hoy = {}
+    for sap_k, f_k in zip(
+        df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"]
+    ):
+      conteo_anexo_hoy[(sap_k, f_k)] = (
+          conteo_anexo_hoy.get((sap_k, f_k), 0) + 1
+      )
 
+    usados_en_anexo = {}
     saldados_list = []
     for _, row in pendientes_hist.iterrows():
       sap_key = str(row["Deudor_SAP_OK"])
       f_str = row["Fecha_Str"]
-      monto_key = round(float(row["Saldo_Num"]), 2)
-      key = (sap_key, f_str, monto_key)
+      key = (sap_key, f_str)
 
-      # Si esta combinación exacta NO está en el anexo de hoy, significa que fue saldado/pagado
-      if key not in claves_anexo_hoy:
+      disponibles = conteo_anexo_hoy.get(key, 0) - usados_en_anexo.get(key, 0)
+      if disponibles > 0:
+        usados_en_anexo[key] = usados_en_anexo.get(key, 0) + 1
+      else:
         saldados_list.append(row)
 
     if saldados_list:
@@ -497,7 +499,6 @@ def procesar_archivos(file_hist, file_anexo):
 
   saldados = pd.concat([saldados_anexo, saldados_historicos], ignore_index=True)
 
-  # ASIGNACIÓN Y RECUPERACIÓN DE NOMBRES Y SAPs CORRECTOS
   for df_temp in [nuevos, pendientes, saldados]:
     if not df_temp.empty:
       if "Nombre_Deudor_OK" not in df_temp.columns:
@@ -638,7 +639,7 @@ with col1:
   )
 
 with col2:
-  st.subheader("Estado_del_Proceso")
+  st.subheader("Estado del Proceso")
   ejecutar = st.button("🚀 EJECUTAR AUDITORÍA", type="primary")
 
 if ejecutar:
