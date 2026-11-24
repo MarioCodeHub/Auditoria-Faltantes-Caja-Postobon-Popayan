@@ -464,6 +464,40 @@ def procesar_archivos(file_hist, file_anexo):
     if r["Nombre_Deudor_OK"] and r["Deudor_SAP_OK"]:
       diccionario_nombres[str(r["Deudor_SAP_OK"])] = r["Nombre_Deudor_OK"]
 
+  # Mapa de montos históricos pendientes por (SAP, Fecha) para identificar abonos/restas
+  mapa_hist_montos = {}
+  if not df_hist.empty:
+    for _, r in df_hist[df_hist["Saldo_Num"] > 0].iterrows():
+      k = (str(r["Deudor_SAP_OK"]), r["Fecha_Str"])
+      monto_ref = (
+          float(r["Saldo_Num"])
+          if float(r["Saldo_Num"]) > 0
+          else float(r["Valor_Faltante_Num"])
+      )
+      mapa_hist_montos.setdefault(k, []).append(monto_ref)
+
+  # Enriquecer pendientes activos cuando provienen de un abono o resta sobre un saldo histórico mayor
+  if not pendientes.empty and mapa_hist_montos:
+    for idx, row in pendientes.iterrows():
+      k = (str(row["Deudor_SAP_OK"]), row["Fecha_Str"])
+      saldo_actual = float(row["Saldo_Num"])
+      candidatos_hist = mapa_hist_montos.get(k, [])
+      mayores = [m for m in candidatos_hist if m > saldo_actual + 0.01]
+      if mayores:
+        valor_inicial = max(mayores)
+        abono_calculado = max(0.0, valor_inicial - saldo_actual)
+        pendientes.at[idx, "Valor_Faltante_Num"] = valor_inicial
+        pendientes.at[idx, "Abonos_Num"] = (
+            float(row["Abonos_Num"]) + abono_calculado
+        )
+        mot_base = str(row["Motivo_OK"]).strip()
+        aviso_abono = (
+            f"Abono/ajuste aplicado (${int(round(abono_calculado)):,})"
+        )
+        pendientes.at[idx, "Motivo_OK"] = (
+            f"{mot_base} | {aviso_abono}" if mot_base else aviso_abono
+        )
+
   # 3. FALTANTES SALDADOS / PAGADOS:
   saldados_anexo = anteriores_anexo[anteriores_anexo["Saldo_Num"] <= 0.01].copy()
 
@@ -471,8 +505,6 @@ def procesar_archivos(file_hist, file_anexo):
   if not df_hist.empty:
     pendientes_hist = df_hist[df_hist["Saldo_Num"] > 0].copy()
 
-    # Conteo por SAP + Fecha en el anexo de hoy:
-    # Si un faltante tuvo resta/abono (ej. =3763000-3013000 -> 750000), sigue existiendo con ese SAP y Fecha en el anexo.
     conteo_anexo_hoy = {}
     for sap_k, f_k in zip(
         df_anexo["Deudor_SAP_OK"].astype(str), df_anexo["Fecha_Str"]
@@ -690,6 +722,11 @@ if ejecutar:
       if df_pendientes.empty:
         st.info("No hay pendientes activos de fechas anteriores.")
       else:
+        st.caption(
+            "💡 Cuando un pendiente anterior registra un abono o resta en el"
+            " anexo, se muestra el valor inicial, el abono descontado y el"
+            " saldo vigente."
+        )
         st.dataframe(df_pendientes, use_container_width=True)
     with tab4:
       if df_omitidos.empty:
